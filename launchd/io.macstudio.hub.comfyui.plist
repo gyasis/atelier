@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.macstudio.hub.comfyui</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyasisutton/services/ComfyUI</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/gyasisutton/services/ComfyUI/.venv/bin/python</string>
+        <string>main.py</string>
+        <string>--listen</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8188</string>
+        <string>--output-directory</string>
+        <string>/Users/gyasisutton/outputs</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/gyasisutton/Library/Logs/comfyui.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyasisutton/Library/Logs/comfyui.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyasisutton/services/ComfyUI/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+        <string>1</string>
+        <key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key>
+        <string>0.0</string>
+        <key>HF_HOME</key>
+        <string>/Users/gyasisutton/models/hf-cache</string>
+    </dict>
+</dict>
+</plist>

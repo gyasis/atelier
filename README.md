@@ -1,0 +1,106 @@
+# Atelier — Mac Studio inference hub
+
+LAN-only AI model server running on a Mac Studio (Apple M1 Max, 64 GB). Hosts production-grade ML inference workloads as Python sidecars so any client on the LAN (a SvelteKit webapp, a notebook, a CLI) can hit one HTTP endpoint per workload instead of running models in-browser.
+
+**Codename: Atelier** (workshop). Internal-only.
+
+## What runs here
+
+| Sidecar | Port | Engine | Use case |
+|---|---|---|---|
+| `kokoro` | 8765 | kokoro-onnx (CoreML/MPS) | Fast basic TTS, fixed-voice library, ~0.6s/line |
+| `dia` | 8769 | nari-labs/Dia-1.6B-0626 (PyTorch MPS) | Expressive multi-speaker dialogue TTS with `(laughs)` / `(sighs)` cues + voice cloning |
+| `comfyui` | 8188 | ComfyUI (PyTorch MPS) | Image + video generation. Wan2.1 1.3B + 14B Q4 verified |
+| Ollama | 11434 | Apple's prebuilt | LLM serving (gemma4:31b, qwen3:32b, etc.) — managed outside Atelier but co-resident |
+
+See `docs/ARCHITECTURE.md` for the full design.
+
+## Hardware requirements
+
+- Apple Silicon Mac (M1/M2/M3 with Max or Ultra variant strongly recommended)
+- 64 GB unified memory — needed to coexist Ollama + ComfyUI + a sidecar without swap
+- ~150 GB free disk for models (Wan2.1 + Dia + Kokoro + cached HF)
+- macOS 14+ (tested on 15.5 Sequoia)
+
+## Install (fresh Mac)
+
+```bash
+git clone <this-repo> ~/Documents/code/atelier
+cd ~/Documents/code/atelier
+bash deploy/install.sh
+```
+
+`install.sh` will:
+1. Verify prerequisites (uv, Homebrew, Xcode CLT).
+2. Create `~/services/<sidecar>/.venv/` for each sidecar.
+3. Symlink the canonical `sidecars/<name>/server.py` from this repo into `~/services/<name>/server.py`.
+4. Copy the launchd plists from `launchd/` into `~/Library/LaunchAgents/`.
+5. Pull the required models into `~/models/` (kokoro-onnx, dia weights, etc.).
+6. `launchctl bootstrap` each plist so services come up.
+
+## Develop
+
+You can hack on Atelier from **either** machine:
+- Locally on the Mac (`cd ~/Documents/code/atelier && edit server.py`) — change takes effect on the next `launchctl kickstart -k gui/$(id -u)/io.macstudio.hub.<name>`.
+- Remotely from a Linux box over SSH (e.g. `ssh gyasisutton@192.168.0.159 'cd ~/Documents/code/atelier && ...'`).
+
+The sidecar `~/services/<name>/server.py` files are symlinks INTO this repo, so edits in the repo land directly in the running service path.
+
+## Repo layout
+
+```
+atelier/
+├── README.md                                — this file
+├── docs/
+│   ├── ARCHITECTURE.md                      — full design + research notes
+│   ├── PRD-atelier-media-toolkit.md         — parked PRD for media helper skills
+│   └── research/                            — Gemini deep-research outputs
+├── sidecars/
+│   ├── kokoro/{server.py,requirements.txt}  — fast basic TTS
+│   └── dia/{server.py,requirements.txt}     — expressive multi-speaker TTS
+├── launchd/                                 — io.macstudio.hub.*.plist files
+└── deploy/
+    └── install.sh                           — bootstrap a fresh Mac
+```
+
+## Operate
+
+```bash
+# List running services
+launchctl list | grep io.macstudio.hub
+
+# Restart a sidecar after editing its server.py
+launchctl kickstart -k gui/$(id -u)/io.macstudio.hub.kokoro
+launchctl kickstart -k gui/$(id -u)/io.macstudio.hub.dia
+
+# Tail logs
+tail -f ~/Library/Logs/dia-sidecar.err.log
+tail -f ~/Library/Logs/kokoro-sidecar.err.log
+tail -f ~/Library/Logs/comfyui.err.log
+
+# Reachability from a LAN client
+curl http://192.168.0.159:8769/healthz   # Dia
+curl http://192.168.0.159:8765/healthz   # Kokoro
+curl http://192.168.0.159:8188/system_stats   # ComfyUI
+```
+
+## Models
+
+Everything lives under `~/models/`. Not in this repo (too big). `install.sh` downloads what's needed.
+
+```
+~/models/
+├── kokoro/                  — kokoro-v1.0.fp16.onnx, voices-v1.0.bin
+├── voice-refs/              — leo_ref.wav, sarah_ref.wav (for Dia cloning)
+├── hf-cache/                — HuggingFace cache (Dia + future)
+└── unet/, vae/, clip/       — ComfyUI: Wan2.1 1.3B + 14B Q4 + umt5 + vae
+```
+
+## Related
+
+- **githubawesome webapp** (`~/Documents/code/githubawesome/webapp/` on the Linux box) — the first Atelier *client*. Proxies its `/api/podcast/tts` endpoint to Atelier's `:8765` or `:8769`.
+- **Global rule** `~/.claude/rules/tools/ollama-apple-silicon.md` — Ollama coexistence rules, MPS env vars, ComfyUI custom-node compatibility — applied by every Claude session that touches this stack.
+
+## License
+
+Internal-use only. Sidecar model licenses vary (see each sidecar's README for upstream license). No redistribution of cloned voices that mimic real people without their consent.

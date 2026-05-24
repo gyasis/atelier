@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.macstudio.hub.kokoro</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyasisutton/services/kokoro-sidecar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/gyasisutton/services/kokoro-sidecar/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>server:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8765</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/gyasisutton/Library/Logs/kokoro-sidecar.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyasisutton/Library/Logs/kokoro-sidecar.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyasisutton/services/kokoro-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>KOKORO_MODEL_PATH</key>
+        <string>/Users/gyasisutton/models/kokoro/kokoro-v1.0.fp16.onnx</string>
+        <key>KOKORO_VOICES_PATH</key>
+        <string>/Users/gyasisutton/models/kokoro/voices-v1.0.bin</string>
+        <key>KOKORO_DEFAULT_VOICE</key>
+        <string>am_michael</string>
+    </dict>
+</dict>
+</plist>
