@@ -1,7 +1,7 @@
 # PRD — Atelier Media-Toolkit Skills (for later)
 
 **Status:** Draft, parked for future work (2026-05-24)
-**Project codename:** **Atelier** (formerly "mac-studio-hub")
+**Project codename:** **Atelier** (formerly "atelier")
 **Author:** drafted with Claude during the Dia 1.6B voice-clone deployment
 **Important:** This PRD is **planning-only**. Implementation is deferred until explicitly scheduled. Captured here so the work doesn't get forgotten and so the next agent picking this up has the full design context.
 

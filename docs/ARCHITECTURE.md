@@ -115,7 +115,7 @@ ComfyUI keeps its own port because every ComfyUI tutorial/docs assume 8188.
 
 LAN-only deployment. Pragmatic choice:
 
-- **v1: shared bearer token via `HUB_TOKEN` env var** loaded by every sidecar + the gateway. Header `Authorization: Bearer <token>`. Token lives in `~/.config/mac-studio-hub/token` on both ends, mode 0600.
+- **v1: shared bearer token via `HUB_TOKEN` env var** loaded by every sidecar + the gateway. Header `Authorization: Bearer <token>`. Token lives in `~/.config/atelier/token` on both ends, mode 0600.
 - **IP allowlist** at the sidecar binding layer — accept only `192.168.0.0/24` connections. Simple `if request.client.host not in allowed_subnet` check in FastAPI; reject otherwise.
 - **Not v1:** mTLS, OAuth, per-user tokens. Overkill for one-user LAN.
 
@@ -159,7 +159,7 @@ Per service, a plist at `~/Library/LaunchAgents/io.macstudio.hub.<service>.plist
     <key>PYTORCH_ENABLE_MPS_FALLBACK</key><string>1</string>
     <key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key><string>0.0</string>
     <key>HF_HOME</key><string>/Users/gyasisutton/models/hf-cache</string>
-    <key>HUB_TOKEN</key><string>FILE:/Users/gyasisutton/.config/mac-studio-hub/token</string>
+    <key>HUB_TOKEN</key><string>FILE:/Users/gyasisutton/.config/atelier/token</string>
   </dict>
 </dict></plist>
 ```
@@ -381,12 +381,12 @@ From the deep-research notes, in priority order:
 - RAG sidecar (Deep Lake or alternative) — when there's an actual document corpus to index.
 - LM-Studio-style model picker UI — webapp work, blocked on `hub-supervisor` :9100 existing.
 - Multi-Mac extension (Studio Ultra as a second box?) — gateway already supports it.
-- ComfyUI workflow library — versioned `.json` workflow files in `mac-studio-hub/workflows/` that the gateway can name and re-use.
+- ComfyUI workflow library — versioned `.json` workflow files in `atelier/workflows/` that the gateway can name and re-use.
 
 ## 11. Repo layout
 
 ```
-mac-studio-hub/
+atelier/
 ├── docs/
 │   ├── ARCHITECTURE.md            # this doc
 │   └── research/
