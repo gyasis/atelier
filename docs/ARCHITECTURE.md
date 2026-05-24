@@ -13,10 +13,11 @@ We want one LAN-only "household AI compute box" hosting multiple inference workl
 |---|---|---|
 | LLM (text gen, script gen, chat) | Ollama | ✅ already running on `192.168.0.159:11434`, LAN-exposed |
 | Embeddings | Ollama (`nomic-embed-text`) | ✅ already available via Ollama |
-| TTS (podcast voices) | Kokoro via Python sidecar | ⏳ to deploy |
+| TTS (basic, fixed voices) | Kokoro via Python sidecar | ⏳ to deploy |
+| TTS (voice cloning + expressive prosody) | F5-TTS / CosyVoice 2 / Fish Speech via Python sidecar | ⏳ to deploy (selection pending) |
 | ASR (transcription) | `mlx-whisper` via Python sidecar | ⏳ to deploy |
 | Image generation | ComfyUI (SDXL / Flux / SD3.5) + optionally `mflux` MLX sidecar | ⏳ to deploy |
-| Video generation | ComfyUI (LTX-Video, Wan2.1 1.3B + 14B Q4, HunyuanVideo Q4) | ⏳ to deploy |
+| Video generation | ComfyUI (Wan2.1 1.3B + 14B Q4 verified; LTX-Video / HunyuanVideo pending) | ✅ deployed 2026-05-23 |
 
 Explicitly **out of scope for v1**:
 
@@ -56,10 +57,11 @@ Explicitly **out of scope for v1**:
    ▼
 [Mac Studio: 192.168.0.159]
    ├── :11434  Ollama (LLM, embeddings, VLM)         ← existing
-   ├── :8765   kokoro-sidecar (TTS)                   ← new
-   ├── :8766   whisper-sidecar (ASR, mlx-whisper)     ← new
-   ├── :8767   mflux-sidecar (fast Flux via MLX)      ← new, optional
-   ├── :8188   ComfyUI headless (image + video)       ← new
+   ├── :8765   kokoro-sidecar (basic TTS)              ← new
+   ├── :8766   whisper-sidecar (ASR, mlx-whisper)      ← new
+   ├── :8767   mflux-sidecar (fast Flux via MLX)       ← new, optional
+   ├── :8769   voice-clone-sidecar (F5/CosyVoice/Fish) ← new
+   ├── :8188   ComfyUI headless (image + video)        ← deployed 2026-05-23
    └── :9100   hub-supervisor (health + model index)  ← new, v2
 ```
 
@@ -98,10 +100,11 @@ Reserved range: `8760-8799`. Currently:
 
 | Port | Service |
 |---|---|
-| 8765 | kokoro-sidecar (TTS) |
+| 8765 | kokoro-sidecar (basic TTS) |
 | 8766 | whisper-sidecar (ASR via mlx-whisper) |
 | 8767 | mflux-sidecar (Flux via MLX, optional) |
 | 8768 | _reserved for future RAG sidecar_ |
+| 8769 | voice-clone-sidecar (F5-TTS / CosyVoice 2 / Fish Speech) |
 | 8188 | ComfyUI (its own default port; not in 87xx range to match upstream convention) |
 | 11434 | Ollama (its own default; not changing) |
 | 9100 | hub-supervisor (v2) |
