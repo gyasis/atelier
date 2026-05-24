@@ -131,3 +131,23 @@ Trigger to execute:
 - OR the user explicitly says "let's do the Atelier toolkit now."
 
 Owner: the user. Estimated effort: ~1 session per skill (research + implement + test).
+
+---
+
+## Addendum 2026-05-24 — `audio-analyze` skill (agent listens to audio)
+
+Today we hit a recurring gap: when diagnosing Dia 1.6B's gibberish output, the agent could not "listen" to the audio. Gemini API natively accepts audio (`inline_data` with `mime_type: audio/wav`) — but the installed `gemini-mcp` server only exposes `watch_video`, which rejects audio-only files. Workaround used today: wrap WAV in an mp4 with a black-frame video track via ffmpeg, then call `watch_video`. Works, but it is exactly the kind of one-off shell incantation this PRD exists to eliminate.
+
+**Add to scope:**
+
+| Skill | Op | Backing |
+|---|---|---|
+| `audio-edit` | (existing scope) trim, normalize, format-convert, voice-isolate | soundfile/ffmpeg |
+| `audio-analyze` | **NEW** — agent semantic analysis of audio content | Google Gemini API direct (audio inline_data), with fallback to mp4-wrap + watch_video |
+
+**Operations:**
+- `transcribe(file)` → text — wraps whisper.cpp / whisper-mlx locally (we already have whisper.cpp on the Linux box, mlx-whisper planned for Mac).
+- `analyze(file, prompt)` → text — sends the audio + a free-text prompt directly to Gemini, gets back a semantic response. (e.g., "describe this audio", "is this speech or noise?", "does this match the following script: ...".)
+- `wrap_as_video(audio_file) → mp4` — utility for any tool that still needs video format.
+
+**Implementation note:** the direct-Gemini-audio path is a 30-line Python script using `google-generativeai`. Should we build this as part of `atelier/` (since it bypasses the MCP layer) or as a standalone Claude skill at `~/.claude/skills/audio-analyze/`? Probably the latter — agents should reach for it without needing Atelier installed.
