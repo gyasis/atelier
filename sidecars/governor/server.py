@@ -15,10 +15,16 @@ Sources:
   - `~/.ollama/logs/server.log`→ per-call latency, load/evict events, the spill signal
 
 Exposes (itself observable — no black boxes):
-  GET /healthz   liveness
-  GET /readyz    what it's monitoring + whether the log tail is live
-  GET /pressure  {level: ok|warn|alarm, free_gb, resident_gb, swapouts, tenants[], alerts[]}
-  GET /telemetry recent inference calls + lifecycle events + last spill
+  GET  /healthz         liveness
+  GET  /readyz          what it's monitoring + whether the log tail is live
+  GET  /pressure        {level, free_gb, resident_gb, swapouts, tenants[], alerts[], auto_action, recommendation}
+  GET  /telemetry       recent inference calls + lifecycle events + last spill
+  GET  /estimate        predicted ETA for a TTS synth or LLM reply (Bayesian per-model)
+  POST /report          feed a completed run into the predictor
+  GET  /benchmark       fire a tiny real generate → measure + record decode tok/s for a model
+  GET  /predictor/stats learned per-model compute stats   ·   GET /predictor/export portable dataset
+  POST /make-room       (b) evict ONLY idle models across both tenants
+  POST /force-stop      (c) human-gated two-phase yield negotiation to preempt a BUSY model
 """
 import asyncio
 import collections
@@ -432,6 +438,55 @@ def predictor_export():
     rows = [dict(x) for x in c.execute("SELECT * FROM runs ORDER BY ts").fetchall()]
     c.close()
     return {"count": len(rows), "schema": "atelier-predictor-v1", "runs": rows}
+
+
+@app.get("/benchmark")
+async def benchmark(model: str = "", tokens: int = 64, keep_alive: str = "0",
+                    prompt: str = "Write a few sentences describing a sunset over the ocean."):
+    """Fire a tiny REAL generate against Ollama to MEASURE decode tok/s for `model`,
+    then record it to the predictor so /estimate sharpens immediately. The rate is
+    clean — eval_count / eval_duration (decode only), NOT total_duration (which folds
+    in cold-load + prompt-eval). Economy-first: keep_alive=0 unloads the model right
+    after the measurement; pass keep_alive=5m to leave it warm.
+    Examples: /benchmark?model=gemma3:4b  ·  /benchmark?model=deepseek-r1:7b&tokens=128"""
+    if not model:
+        return {"ok": False, "error": "model required (e.g. /benchmark?model=gemma3:4b)"}
+    payload = {"model": model, "prompt": prompt, "stream": False,
+               "keep_alive": keep_alive, "options": {"num_predict": tokens}}
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=180)
+        except Exception as e:
+            return {"ok": False, "error": f"ollama generate failed: {e}"}
+    if r.status_code != 200:
+        return {"ok": False, "error": f"ollama {r.status_code}: {r.text[:200]}"}
+    d = r.json()
+    eval_count = d.get("eval_count") or 0
+    eval_ns = d.get("eval_duration") or 0
+    if not eval_count or not eval_ns:
+        return {"ok": False, "error": "ollama returned no decode stats (0 tokens?)", "raw": d}
+    decode_s = eval_ns / 1e9
+    load_s = (d.get("load_duration") or 0) / 1e9
+    state = "cold" if load_s > 1.0 else "warm"   # a real cold-load shows up as seconds of load_duration
+    prompt_count = d.get("prompt_eval_count")
+    measured = {
+        "decode_tok_s": round(eval_count / decode_s, 1), "out_tokens": eval_count,
+        "decode_s": round(decode_s, 2), "prompt_tokens": prompt_count,
+        "load_s": round(load_s, 2), "total_s": round((d.get("total_duration") or 0) / 1e9, 2),
+        "state": state,
+    }
+    try:
+        predictor.record(kind="llm", model=model, seconds=decode_s, out_units=eval_count,
+                         in_units=prompt_count, location="local", host="mac-studio",
+                         device="mps", state=state)
+        recorded = True
+    except Exception as e:
+        print(f"[governor] benchmark record failed: {e}", flush=True)
+        recorded = False
+    return {"ok": True, "model": model, "measured": measured, "recorded": recorded,
+            "keep_alive": keep_alive,
+            "now_predicts": predictor.predict(kind="llm", model=model,
+                                               out_units=tokens, location="local", state="warm")}
 
 
 def _ollama_recently_active(window: float = 15.0) -> bool:
