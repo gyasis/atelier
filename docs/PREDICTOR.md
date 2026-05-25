@@ -55,6 +55,8 @@ compute stats across the fleet.
 - ✅ live TTS synths auto-recorded (governor tails sidecar logs)
 - ✅ gateway → `/report`: githubawesome `podcast.ts` reports its Gemini script-gen runs
   (cloud LLM) — verified: gemini-2.5-flash learned at ~90 tok/s, /estimate now empirical+prior
-- ⏳ on-demand `/benchmark?model=X` (governor fires a tiny generate → seeds tps)
+- ✅ on-demand `/benchmark?model=X` — fires a tiny generate, measures clean decode
+  tps (`eval_count / eval_duration`), records it; `keep_alive=0` unloads after
+  (economy-first). Verified: moondream measured 230 tok/s, predictor → empirical+prior.
 - ⏳ host/device auto-detection + per-host rate buckets (CPU vs GPU vs cloud)
 - ⏳ live network-latency measurement for the cloud/Claude fixed cost
