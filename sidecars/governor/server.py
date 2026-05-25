@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Atelier memory governor — monitor (b0) + make-room (b).
+"""Atelier memory governor — monitor (b0) + make-room (b) + force-stop (c) + watcher (d).
 
-Observes the whole hub and computes one unified-memory pressure signal (b0), and frees
-memory on demand by evicting ONLY idle models across both tenants (b, make-room). It
-never touches a busy model — observe before you act, never evict what's working
-(Constitution I). force-preempt of a busy model (c) and the auto pressure-watcher (d)
-build on this.
+Observes the whole hub and computes one unified-memory pressure signal (b0); frees
+memory on demand by evicting ONLY idle models across both tenants (b, make-room);
+human-gated force-preempt of a BUSY model via a two-phase yield negotiation (c,
+/force-stop); and an auto pressure-watcher (d) that on ALARM runs make-room itself
+but only RECOMMENDS (never executes) a force-stop. It never silently touches a busy
+model — observe before you act, never evict what's working (Constitution I).
 
 Sources:
   - macOS `vm_stat`            → free / resident memory + swapouts (the cliff itself)
@@ -43,6 +44,9 @@ WARN_GB = float(os.environ.get("ATELIER_WARN_GB", "45"))     # approaching the c
 POLL_SECONDS = int(os.environ.get("ATELIER_POLL_SECONDS", "10"))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_LOG = Path(os.environ.get("OLLAMA_LOG", str(Path.home() / ".ollama/logs/server.log")))
+# (d) auto pressure-watcher: on ALARM, auto-run make-room (idle eviction only).
+AUTO_MAKE_ROOM = os.environ.get("ATELIER_AUTO_MAKE_ROOM", "1") not in ("0", "false", "no")
+AUTO_COOLDOWN = float(os.environ.get("ATELIER_AUTO_COOLDOWN", "60"))  # min seconds between auto evictions
 
 SIDECAR_BASE = {
     "omnivoice": "http://127.0.0.1:8770",
@@ -65,7 +69,10 @@ SIDECAR_LABELS = {
 _state = {
     "updated_at": None, "level": "ok", "free_gb": None, "resident_gb": None,
     "swapouts": None, "tenants": [], "alerts": [],
+    "auto_action": None,      # (d) last auto make-room the watcher ran
+    "recommendation": None,   # (d) force-stop the agent should surface for human authorization
 }
+_last_auto = 0.0   # (d) cooldown clock for auto make-room
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log)
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
 _recent_synths = collections.deque(maxlen=50)   # per-call sidecar TTS telemetry (from sidecar logs)
@@ -136,6 +143,62 @@ def compute_level(vm: dict, spill_recent: bool) -> tuple[str, list[str]]:
             alerts.append("Ollama model spilled to system RAM (offload < model)")
     return level, alerts
 
+def _preempt_candidate(tenants: list[dict]) -> dict | None:
+    """Pick the best BUSY model to RECOMMEND preempting (largest memory win first).
+    Recommendation only — never auto-executed; force-stop is human-gated (c)."""
+    busy = []
+    for t in tenants:
+        if t.get("tenant") == "ollama" and t.get("state") == "busy":
+            busy.append({"target": f"ollama:{t['name']}", "mem_gb": t.get("mem_gb", 0),
+                         "why": f"ollama model busy ({t.get('mem_gb', 0)} GB)"})
+        elif t.get("tenant") == "atelier" and (t.get("active_jobs") or 0) > 0:
+            busy.append({"target": t["name"], "mem_gb": None,
+                         "why": f"{t['active_jobs']} active job(s), queue {t.get('queue_depth', 0)}"})
+    if not busy:
+        return None
+    busy.sort(key=lambda b: (b["mem_gb"] is not None, b["mem_gb"] or 0), reverse=True)
+    return busy[0]
+
+
+async def _auto_relieve(vm: dict, tenants: list[dict]):
+    """(d) On ALARM: auto-run make-room (idle eviction — SAFE, can't interrupt a job).
+    If still over the cliff afterward, RECOMMEND a force-stop but never execute it —
+    preempting a busy model stays human-gated (c). The watcher escalates to a human,
+    it does not act on its own."""
+    global _last_auto
+    if not AUTO_MAKE_ROOM:
+        return
+    now = time.time()
+    if now - _last_auto < AUTO_COOLDOWN:
+        return
+    _last_auto = now
+    res = await make_room(MakeRoomReq(dry_run=False))
+    freed = [f.get("name") for f in res.get("freed", []) if f.get("evicted") or f.get("result")]
+    _state["auto_action"] = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "trigger": "alarm",
+        "ran": "make-room (idle eviction)", "freed": freed,
+        "before_gb": res.get("before_gb"), "after_gb": res.get("after_gb"),
+    }
+    print(f"[governor] AUTO make-room on ALARM — freed {freed}, "
+          f"{res.get('before_gb')}→{res.get('after_gb')}GB", flush=True)
+    after_vm = read_vm()
+    if after_vm["resident_gb"] >= CLIFF_GB:
+        cand = _preempt_candidate(tenants)
+        if cand:
+            _state["recommendation"] = {
+                "action": "force-stop", "candidate": cand["target"], "reason": cand["why"],
+                "after_idle_evict_gb": after_vm["resident_gb"], "cliff_gb": CLIFF_GB,
+                "how": (f"idle eviction wasn't enough — a human must authorize preempting a busy "
+                        f"model: POST /force-stop {{\"target\":\"{cand['target']}\"}} for the preview, "
+                        f"then re-POST confirm=true + token"),
+                "note": "NOT auto-executed — force-stop is human-gated (c)",
+            }
+            print(f"[governor] RECOMMEND force-stop {cand['target']} — still "
+                  f"{after_vm['resident_gb']}GB after idle evict (human must authorize)", flush=True)
+    else:
+        _state["recommendation"] = None
+
+
 async def _poller():
     async with httpx.AsyncClient() as client:
         while True:
@@ -153,6 +216,10 @@ async def _poller():
                 })
                 if level != "ok":
                     print(f"[governor] {level.upper()} — resident={vm['resident_gb']}GB free={vm['free_gb']}GB :: {'; '.join(alerts)}", flush=True)
+                if level == "alarm":
+                    await _auto_relieve(vm, tenants)   # (d) auto idle-evict; recommend (not execute) force-stop
+                elif level == "ok":
+                    _state["recommendation"] = None    # pressure cleared — drop any stale recommendation
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
             await asyncio.sleep(POLL_SECONDS)
