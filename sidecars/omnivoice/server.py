@@ -252,7 +252,7 @@ async def tts(req: TtsReq, request: Request):
             )
         except Exception as e:
             print(f"[omnivoice] pitch shift failed ({e}) — returning unshifted")
-    print(f"[tts] chars={len(req.text)} {elapsed:.2f}s rtf={elapsed/(len(samples)/sample_rate):.2f}x")
+    print(f"[tts] chars={len(req.text)} num_step={req.num_step} {elapsed:.2f}s rtf={elapsed/(len(samples)/sample_rate):.2f}x")
     buf = io.BytesIO()
     sf.write(buf, np.asarray(samples), sample_rate, format="WAV", subtype="PCM_16")
     buf.seek(0)

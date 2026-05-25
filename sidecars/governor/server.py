@@ -210,6 +210,20 @@ async def _log_tailer():
 # Tail those so synth calls are visible in the governor — not siloed in each
 # sidecar's private log (Constitution I: one observable pane, no black boxes).
 _TTS = re.compile(r'\[tts\].*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(?P<rtf>[\d.]+)x)?')
+_NS = re.compile(r'num_step=(\d+)')
+_backfilled: set = set()  # log paths whose tail we've already seeded into _recent_synths
+
+def _ingest_tts(name: str, line: str):
+    m = _TTS.search(line)
+    if not m:
+        return
+    ns = _NS.search(line)
+    _recent_synths.append({
+        "at": time.strftime("%H:%M:%S"), "ts": time.time(), "engine": name,
+        "chars": int(m.group("chars")), "seconds": float(m.group("sec")),
+        "rtf": float(m.group("rtf")) if m.group("rtf") else None,
+        "num_step": int(ns.group(1)) if ns else None,
+    })
 
 async def _tail_sidecar(name: str, path: Path):
     while True:
@@ -218,19 +232,19 @@ async def _tail_sidecar(name: str, path: Path):
                 await asyncio.sleep(5)
                 continue
             with path.open("r", errors="replace") as f:
+                # Seed the estimator from the log tail once per process, so /estimate
+                # is useful immediately after a restart (telemetry is in-memory and
+                # would otherwise cold-start empty).
+                if str(path) not in _backfilled:
+                    for ln in [x for x in f.readlines() if "[tts]" in x][-30:]:
+                        _ingest_tts(name, ln)
+                    _backfilled.add(str(path))
                 f.seek(0, os.SEEK_END)
                 inode = os.fstat(f.fileno()).st_ino
                 while True:
                     line = f.readline()
                     if line:
-                        m = _TTS.search(line)
-                        if m:
-                            _recent_synths.append({
-                                "at": time.strftime("%H:%M:%S"), "ts": time.time(),
-                                "engine": name, "chars": int(m.group("chars")),
-                                "seconds": float(m.group("sec")),
-                                "rtf": float(m.group("rtf")) if m.group("rtf") else None,
-                            })
+                        _ingest_tts(name, line)
                         continue
                     await asyncio.sleep(1)
                     try:
@@ -256,7 +270,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.4-estimate"}
+    return {"ok": True, "service": "governor", "version": "0.5-estimate-backfill-numstep"}
 
 @app.get("/readyz")
 def readyz():
@@ -275,7 +289,7 @@ def telemetry():
 
 
 @app.get("/estimate")
-def estimate(engine: str, chars: int = 0):
+def estimate(engine: str, chars: int = 0, num_step: int | None = None):
     """ETA for a TTS synth, learned from recorded telemetry (median seconds/char
     over recent synths for that engine). The data comes from /telemetry's
     recent_synths — every synth teaches the estimate.
@@ -288,16 +302,22 @@ def estimate(engine: str, chars: int = 0):
                 "note": "LLM reply time = expected_output_tokens / tokens_per_sec. "
                         "Enable OLLAMA_DEBUG_LOG_REQUESTS=true so the governor can learn tokens/s."}
     samples = [s for s in _recent_synths if s["engine"] == engine and s.get("chars")]
+    used_ns = None
+    if num_step is not None:
+        ns_samples = [s for s in samples if s.get("num_step") == num_step]
+        if ns_samples:
+            samples, used_ns = ns_samples, num_step
     if not samples:
         return {"engine": engine, "input_chars": chars, "est_seconds": None,
                 "samples": 0, "note": "no telemetry yet for this engine — run a synth first"}
     rates = sorted(s["seconds"] / s["chars"] for s in samples)
     spc = statistics.median(rates)
-    return {"engine": engine, "input_chars": chars,
+    return {"engine": engine, "input_chars": chars, "num_step": used_ns,
             "est_seconds": round(chars * spc, 1) if chars else None,
             "sec_per_char": round(spc, 4), "samples": len(samples),
             "range_s_per_char": [round(rates[0], 4), round(rates[-1], 4)],
-            "note": "median over recent synths; not yet split by num_step / clone-vs-plain"}
+            "note": (f"filtered to num_step={used_ns}" if used_ns
+                     else "blended over recent synths — pass ?num_step=48|64 to split")}
 
 
 def _ollama_recently_active(window: float = 15.0) -> bool:
