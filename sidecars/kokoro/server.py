@@ -18,6 +18,7 @@ Env vars:
 """
 
 import asyncio
+import gc
 import io
 import os
 import time
@@ -39,16 +40,28 @@ VOICES_PATH = os.environ.get(
 )
 HUB_TOKEN = os.environ.get("HUB_TOKEN")
 DEFAULT_VOICE = os.environ.get("KOKORO_DEFAULT_VOICE", "am_michael")
+# Constitutional idle-unload (2026-05-24). Kokoro defaults to KEEP_WARM=true
+# because it serves the live podcast pipeline — every cold-load adds ~2s
+# latency that the user feels per chapter. Set KEEP_WARM=false to opt into
+# memory-saving unloads (overnight / multi-model contention scenarios).
+IDLE_UNLOAD_SECONDS = int(os.environ.get("IDLE_UNLOAD_SECONDS", "300"))
+KEEP_WARM = os.environ.get("KEEP_WARM", "true").lower() in ("1", "true", "yes")
+IDLE_TICK_SECONDS = 30
 
 _kokoro: Kokoro | None = None
 _warmed: bool = False
 _sem = asyncio.Semaphore(1)
 _voices: list[str] = []
+_last_request_at = time.monotonic()
+_unload_task: asyncio.Task | None = None
+_idle_unloaded_at: float | None = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _kokoro, _warmed, _voices
+async def _load_and_warm():
+    """Cold-load Kokoro + warmup. Idempotent."""
+    global _kokoro, _warmed, _voices, _idle_unloaded_at
+    if _kokoro is not None and _warmed:
+        return
     t0 = time.perf_counter()
     _kokoro = Kokoro(MODEL_PATH, VOICES_PATH)
     try:
@@ -57,15 +70,52 @@ async def lifespan(app: FastAPI):
         _voices = []
     print(f"[kokoro] model loaded in {time.perf_counter()-t0:.2f}s, voices={len(_voices)}")
     try:
-        async with _sem:
-            await asyncio.to_thread(
-                _kokoro.create, "hello", voice=DEFAULT_VOICE, speed=1.0, lang="en-us"
-            )
+        await asyncio.to_thread(_kokoro.create, "hello", voice=DEFAULT_VOICE, speed=1.0, lang="en-us")
         _warmed = True
+        _idle_unloaded_at = None
         print(f"[kokoro] warmup OK in {time.perf_counter()-t0:.2f}s")
     except Exception as e:
         print(f"[kokoro] warmup failed: {e}")
+
+
+async def _unload_model():
+    """Drop Kokoro model (small ~80 MB ONNX, but still — hub courtesy)."""
+    global _kokoro, _warmed, _idle_unloaded_at
+    if _kokoro is None:
+        return
+    print(f"[kokoro] idle-unload")
+    _kokoro = None
+    _warmed = False
+    _idle_unloaded_at = time.monotonic()
+    gc.collect()
+
+
+async def _idle_watcher():
+    if KEEP_WARM:
+        print(f"[kokoro] idle-watcher disabled (KEEP_WARM=true)")
+        return
+    print(f"[kokoro] idle-watcher active (unload after {IDLE_UNLOAD_SECONDS}s idle)")
+    while True:
+        await asyncio.sleep(IDLE_TICK_SECONDS)
+        if _kokoro is None:
+            continue
+        if time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
+            async with _sem:
+                if _kokoro is not None:
+                    await _unload_model()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _unload_task
+    async with _sem:
+        await _load_and_warm()
+    _unload_task = asyncio.create_task(_idle_watcher())
     yield
+    if _unload_task and not _unload_task.done():
+        _unload_task.cancel()
+        try: await _unload_task
+        except asyncio.CancelledError: pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -86,13 +136,18 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    if not _warmed:
-        return JSONResponse({"ok": False, "warmed": False}, status_code=503)
+    state = "warm" if _warmed and _kokoro is not None else "cold"
     return {
         "ok": True,
-        "models_loaded": [os.path.basename(MODEL_PATH)],
+        "state": state,
+        "warmed": _warmed,
+        "models_loaded": [os.path.basename(MODEL_PATH)] if _kokoro else [],
         "device": "coreml/mps",
         "voices": len(_voices),
+        "idle_seconds": round(time.monotonic() - _last_request_at, 1),
+        "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        "keep_warm": KEEP_WARM,
+        "last_unload_ago_s": round(time.monotonic() - _idle_unloaded_at, 1) if _idle_unloaded_at else None,
     }
 
 
@@ -100,6 +155,17 @@ def readyz():
 def voices(request: Request):
     _check_auth(request)
     return {"voices": _voices, "default": DEFAULT_VOICE}
+
+
+@app.post("/admin/unload")
+async def admin_unload(request: Request):
+    """Force-unload the model NOW (manual override)."""
+    _check_auth(request)
+    was_loaded = _kokoro is not None
+    if was_loaded:
+        async with _sem:
+            await _unload_model()
+    return {"unloaded": was_loaded, "model": os.path.basename(MODEL_PATH)}
 
 
 class TtsReq(BaseModel):
@@ -111,11 +177,18 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
+    global _last_request_at
     _check_auth(request)
-    if not _warmed:
-        raise HTTPException(503, "warming up")
     if not req.text.strip():
         raise HTTPException(400, "empty text")
+    # Cold-load if previously idle-unloaded
+    if _kokoro is None or not _warmed:
+        print(f"[kokoro] cold-load triggered by /tts")
+        async with _sem:
+            await _load_and_warm()
+        if not _warmed:
+            raise HTTPException(503, "cold-load failed")
+    _last_request_at = time.monotonic()
     t0 = time.perf_counter()
     async with _sem:
         try:

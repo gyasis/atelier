@@ -28,11 +28,12 @@ mkdir -p "$SERVICES_DIR" "$LAUNCHAGENTS_DIR" "$LOGS_DIR"
 mkdir -p "$MODELS_DIR"/{kokoro,voice-refs,hf-cache,unet,clip,vae,loras,video,whisper,checkpoints}
 
 # ---------- 3. Sidecar venvs ----------
-for SC in kokoro dia; do
+for SC in kokoro dia omnivoice; do
   SC_DIR="$SERVICES_DIR/${SC}-sidecar"
   case "$SC" in
-    kokoro) SC_DIR="$SERVICES_DIR/kokoro-sidecar" ;;
-    dia)    SC_DIR="$SERVICES_DIR/voice-clone-sidecar" ;;
+    kokoro)    SC_DIR="$SERVICES_DIR/kokoro-sidecar" ;;
+    dia)       SC_DIR="$SERVICES_DIR/voice-clone-sidecar" ;;
+    omnivoice) SC_DIR="$SERVICES_DIR/omnivoice-sidecar" ;;
   esac
   say "setting up sidecar: $SC -> $SC_DIR"
   mkdir -p "$SC_DIR"
@@ -70,6 +71,8 @@ if [ ! -f "$MODELS_DIR/kokoro/voices-v1.0.bin" ]; then
 fi
 
 # Dia downloads on first run via HF_HOME — no install-time fetch needed.
+# OmniVoice (k2-fsa/OmniVoice) likewise auto-downloads its 13 model files on
+# first startup via HF_HOME — no install-time fetch needed.
 
 # Voice refs (LEO + SARAH) for Dia cloning
 if [ ! -f "$MODELS_DIR/voice-refs/leo_ref.wav" ]; then
@@ -97,7 +100,7 @@ done
 # ---------- 7. Verify ----------
 say "verifying services (give them ~30s to warm)…"
 sleep 30
-for PORT in 8765 8769; do
+for PORT in 8765 8769 8770; do
   if curl -sf --max-time 3 "http://localhost:$PORT/healthz" >/dev/null; then
     echo -e "  \033[1;32m✓\033[0m http://localhost:$PORT/healthz"
   else

@@ -1,0 +1,240 @@
+"""
+omnivoice-local — OmniVoice (k2-fsa, Apache 2.0) on Linux RTX 2060 CUDA.
+
+Multi-speaker zero-shot TTS via Diffusion Language Model. Beats Dia 1.6B by
+40x on Apple Silicon per Gemini deep_research 2026-05-24, expected ~0.05x
+RTF on CUDA. Sidecar mirrors the atelier pattern documented in
+~/Documents/code/atelier/docs/SIDECAR_PATTERN.md:
+  GET /healthz, /readyz, /voices
+  POST /tts, /admin/unload
+
+Endpoint diffs vs Kokoro:
+  - /tts accepts optional `ref_audio` (path or base64) for voice cloning
+  - voices list is dynamic (model-defined, not preset)
+  - default port 18770 (matches Mac convention with +10000 offset)
+
+Env vars:
+  OMNIVOICE_MODEL          default "k2-fsa/OmniVoice" (HF hub id)
+  OMNIVOICE_DEVICE         default "cuda" (or "cpu" / "mps")
+  OMNIVOICE_PORT           default 18770
+  IDLE_UNLOAD_SECONDS      default 240 (4 min)
+  KEEP_WARM                default "false" (NEW model — let it unload while we evaluate)
+  HUB_TOKEN                optional bearer token
+"""
+import asyncio
+import gc
+import io
+import os
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+import torch
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+
+from omnivoice import OmniVoice, OmniVoiceGenerationConfig
+
+MODEL_ID = os.environ.get("OMNIVOICE_MODEL", "k2-fsa/OmniVoice")
+def _auto_device() -> str:
+    if torch.cuda.is_available(): return "cuda"
+    if torch.backends.mps.is_available(): return "mps"
+    return "cpu"
+DEVICE = os.environ.get("OMNIVOICE_DEVICE", _auto_device())
+HUB_TOKEN = os.environ.get("HUB_TOKEN")
+IDLE_UNLOAD_SECONDS = int(os.environ.get("IDLE_UNLOAD_SECONDS", "240"))
+KEEP_WARM = os.environ.get("KEEP_WARM", "false").lower() in ("1", "true", "yes")
+IDLE_TICK_SECONDS = 30
+DTYPE = torch.float16 if DEVICE != "cpu" else torch.float32
+
+_model: OmniVoice | None = None
+_warmed: bool = False
+_sem = asyncio.Semaphore(1)
+_last_request_at = time.monotonic()
+_unload_task: asyncio.Task | None = None
+_idle_unloaded_at: float | None = None
+
+
+async def _load_and_warm():
+    global _model, _warmed, _idle_unloaded_at
+    if _model is not None and _warmed:
+        return
+    t0 = time.perf_counter()
+    print(f"[omnivoice-local] loading {MODEL_ID} on {DEVICE} ({DTYPE})")
+    _model = await asyncio.to_thread(
+        lambda: OmniVoice.from_pretrained(MODEL_ID, device_map=DEVICE, dtype=DTYPE, load_asr=False)
+    )
+    print(f"[omnivoice-local] model loaded in {time.perf_counter()-t0:.2f}s")
+    try:
+        await asyncio.to_thread(_model.generate, text="warmup", language="en")
+        _warmed = True
+        _idle_unloaded_at = None
+        print(f"[omnivoice-local] warmup OK in {time.perf_counter()-t0:.2f}s")
+    except Exception as e:
+        print(f"[omnivoice-local] warmup failed: {e}")
+        _warmed = False
+
+
+async def _unload_model():
+    global _model, _warmed, _idle_unloaded_at
+    if _model is None:
+        return
+    print(f"[omnivoice-local] idle-unload — freeing model from {DEVICE}")
+    _model = None
+    _warmed = False
+    _idle_unloaded_at = time.monotonic()
+    gc.collect()
+    if DEVICE == "cuda" and torch.cuda.is_available():
+        try: torch.cuda.empty_cache()
+        except Exception: pass
+
+
+async def _idle_watcher():
+    if KEEP_WARM:
+        print(f"[omnivoice-local] idle-watcher disabled (KEEP_WARM=true)")
+        return
+    print(f"[omnivoice-local] idle-watcher active (unload after {IDLE_UNLOAD_SECONDS}s idle)")
+    while True:
+        await asyncio.sleep(IDLE_TICK_SECONDS)
+        if _model is None:
+            continue
+        if time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
+            async with _sem:
+                if _model is not None:
+                    await _unload_model()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _unload_task
+    async with _sem:
+        await _load_and_warm()
+    _unload_task = asyncio.create_task(_idle_watcher())
+    yield
+    if _unload_task and not _unload_task.done():
+        _unload_task.cancel()
+        try: await _unload_task
+        except asyncio.CancelledError: pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def _check_auth(request: Request) -> None:
+    if not HUB_TOKEN:
+        return
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer ") or auth[7:] != HUB_TOKEN:
+        raise HTTPException(401, "invalid bearer token")
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "service": "omnivoice-local", "version": "1.0", "device": DEVICE}
+
+
+@app.get("/readyz")
+def readyz():
+    state = "warm" if _warmed and _model is not None else "cold"
+    return {
+        "ok": True,
+        "state": state,
+        "warmed": _warmed,
+        "model": MODEL_ID if _model else None,
+        "device": DEVICE,
+        "dtype": str(DTYPE).replace("torch.", ""),
+        "idle_seconds": round(time.monotonic() - _last_request_at, 1),
+        "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        "keep_warm": KEEP_WARM,
+        "last_unload_ago_s": round(time.monotonic() - _idle_unloaded_at, 1) if _idle_unloaded_at else None,
+    }
+
+
+@app.post("/admin/unload")
+async def admin_unload(request: Request):
+    """Force-unload the model NOW (manual override)."""
+    _check_auth(request)
+    was_loaded = _model is not None
+    if was_loaded:
+        async with _sem:
+            await _unload_model()
+    return {"unloaded": was_loaded, "model": MODEL_ID, "device": DEVICE}
+
+
+class TtsReq(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+    language: str = "en"
+    ref_audio: str | None = Field(None, description="optional path to reference audio for voice cloning (3-10s clip)")
+    ref_text: str | None = Field(None, description="optional transcript of the reference audio")
+    speed: float = Field(1.0, ge=0.5, le=2.0)
+    # Quality knobs — defaults tuned for less-robotic output (vs OmniVoice's
+    # speed-optimized 32/2.0/0.0). num_step is the big lever; class_temperature
+    # adds natural prosodic variation (0.0 = deterministic = robotic).
+    num_step: int = Field(48, ge=8, le=128, description="diffusion steps — higher = smoother, slower")
+    guidance_scale: float = Field(2.0, ge=1.0, le=5.0)
+    class_temperature: float = Field(0.3, ge=0.0, le=1.5, description="prosodic variation — 0=deterministic")
+    # Style prompt — OmniVoice's text-conditioned control (accent, tone, emotion).
+    instruct: str | None = Field(None, description="e.g. 'Speak with a British accent, bright feminine tone'")
+    # Post-process pitch shift in semitones (librosa, tempo-preserving). +2..+4
+    # makes a voice brighter/higher; negative lowers. 0 = no shift.
+    pitch_semitones: float = Field(0.0, ge=-12.0, le=12.0)
+
+
+@app.post("/tts")
+async def tts(req: TtsReq, request: Request):
+    global _last_request_at
+    _check_auth(request)
+    if not req.text.strip():
+        raise HTTPException(400, "empty text")
+    if _model is None or not _warmed:
+        print(f"[omnivoice-local] cold-load triggered by /tts")
+        async with _sem:
+            await _load_and_warm()
+        if not _warmed:
+            raise HTTPException(503, "cold-load failed")
+    _last_request_at = time.monotonic()
+    t0 = time.perf_counter()
+    async with _sem:
+        try:
+            gen_cfg = OmniVoiceGenerationConfig(
+                num_step=req.num_step,
+                guidance_scale=req.guidance_scale,
+                class_temperature=req.class_temperature,
+            )
+            gen_kwargs = {"text": req.text, "language": req.language, "speed": req.speed, "generation_config": gen_cfg}
+            if req.ref_audio:
+                gen_kwargs["ref_audio"] = req.ref_audio
+            if req.ref_text:
+                gen_kwargs["ref_text"] = req.ref_text
+            if req.instruct:
+                gen_kwargs["instruct"] = req.instruct
+            audio_list = await asyncio.to_thread(_model.generate, **gen_kwargs)
+        except Exception as e:
+            raise HTTPException(500, f"synthesis failed: {e}")
+    elapsed = time.perf_counter() - t0
+    # OmniVoice.generate() returns list[np.ndarray] — take the first (batch=1)
+    samples = audio_list[0] if isinstance(audio_list, list) else audio_list
+    # OmniVoice default sample rate is 24000 Hz (per the research spec)
+    sample_rate = 24000
+    # Optional tempo-preserving pitch shift (librosa). Lets SARAH be brighter
+    # without re-cloning. Applied post-synth so it composes with any voice.
+    if req.pitch_semitones != 0.0:
+        try:
+            import librosa
+            samples = librosa.effects.pitch_shift(
+                np.asarray(samples, dtype=np.float32), sr=sample_rate, n_steps=req.pitch_semitones
+            )
+        except Exception as e:
+            print(f"[omnivoice] pitch shift failed ({e}) — returning unshifted")
+    print(f"[tts] chars={len(req.text)} {elapsed:.2f}s rtf={elapsed/(len(samples)/sample_rate):.2f}x")
+    buf = io.BytesIO()
+    sf.write(buf, np.asarray(samples), sample_rate, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="audio/wav",
+        headers={"x-synth-seconds": f"{elapsed:.3f}", "x-device": DEVICE},
+    )

@@ -23,6 +23,7 @@ Env vars:
 """
 
 import asyncio
+import gc
 import io
 import os
 import time
@@ -41,6 +42,13 @@ MODEL_CHECKPOINT = os.environ.get("DIA_MODEL_CHECKPOINT", "nari-labs/Dia-1.6B-06
 DEVICE = os.environ.get("DIA_DEVICE", "mps")
 DTYPE_STR = os.environ.get("DIA_DTYPE", "float16")
 HUB_TOKEN = os.environ.get("HUB_TOKEN")
+# Constitutional principle (added 2026-05-24): idle-loaded models on a shared
+# inference hub waste precious unified memory. Default: unload after 3 min
+# of no requests. Override per-instance with KEEP_WARM=true (e.g. for live
+# pipelines where cold-start latency is unacceptable).
+IDLE_UNLOAD_SECONDS = int(os.environ.get("IDLE_UNLOAD_SECONDS", "180"))
+KEEP_WARM = os.environ.get("KEEP_WARM", "false").lower() in ("1", "true", "yes")
+IDLE_TICK_SECONDS = 30
 
 LEO_REF_AUDIO = os.environ.get(
     "DIA_LEO_REF_AUDIO", "/Users/gyasisutton/models/voice-refs/leo_ref.wav"
@@ -71,6 +79,9 @@ _leo_audio = None
 _sarah_audio = None
 _clone_prefix_text = ""  # "[S1] <leo ref> [S2] <sarah ref> " — prepended to every gen
 _clone_audio = None       # numpy array of concatenated leo+sarah refs
+_last_request_at = time.monotonic()
+_unload_task: asyncio.Task | None = None
+_idle_unloaded_at: float | None = None  # timestamp of most recent unload (for /readyz reporting)
 
 
 def _normalize_script(text: str) -> str:
@@ -92,13 +103,16 @@ def _load_audio_mono(path: str, target_sr: int = 44_100) -> np.ndarray:
     return data
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _processor, _model, _warmed, _leo_audio, _sarah_audio, _clone_prefix_text, _clone_audio
-
+async def _load_processor_and_model_and_warm() -> None:
+    """Cold-load Dia: processor + model + warmup. Idempotent; if already
+    loaded, skips. Used both at startup and after idle-unload."""
+    global _processor, _model, _warmed, _idle_unloaded_at
+    if _model is not None and _warmed:
+        return
     t0 = time.perf_counter()
     print(f"[dia] loading processor + model from {MODEL_CHECKPOINT} on {DEVICE}/{DTYPE_STR}")
-    _processor = await asyncio.to_thread(AutoProcessor.from_pretrained, MODEL_CHECKPOINT)
+    if _processor is None:
+        _processor = await asyncio.to_thread(AutoProcessor.from_pretrained, MODEL_CHECKPOINT)
     torch_dtype = DTYPE_MAP.get(DTYPE_STR, torch.float16)
     _model = await asyncio.to_thread(
         lambda: DiaForConditionalGeneration.from_pretrained(
@@ -106,13 +120,73 @@ async def lifespan(app: FastAPI):
         ).to(DEVICE)
     )
     print(f"[dia] model loaded in {time.perf_counter()-t0:.1f}s")
+    # Warmup (semaphore acquired by caller OR not needed during startup)
+    try:
+        warm_text = ["[S1] Warming up. [S2] Ready."]
+        inputs = await asyncio.to_thread(
+            lambda: _processor(text=warm_text, padding=True, return_tensors="pt").to(DEVICE)
+        )
+        with torch.no_grad():
+            _ = await asyncio.to_thread(
+                lambda: _model.generate(
+                    **inputs, max_new_tokens=256, guidance_scale=3.0,
+                    temperature=1.0, top_p=0.9, top_k=45,
+                )
+            )
+        _warmed = True
+        _idle_unloaded_at = None
+        print(f"[dia] warmup OK in {time.perf_counter()-t0:.1f}s total, cloning={'on' if _clone_audio is not None else 'off'}")
+    except Exception as e:
+        print(f"[dia] warmup failed: {e}")
+        _warmed = False
 
-    # Load reference audio for voice cloning.
+
+async def _unload_model() -> None:
+    """Drop the model from MPS memory. Voice-clone reference audio is kept
+    (it's ~100KB, negligible). Processor is also kept since it's lightweight
+    and avoids re-downloading on next load."""
+    global _model, _warmed, _idle_unloaded_at
+    if _model is None:
+        return
+    print(f"[dia] idle-unload — freeing model from {DEVICE}")
+    _model = None
+    _warmed = False
+    _idle_unloaded_at = time.monotonic()
+    gc.collect()
+    if DEVICE == "mps" and hasattr(torch.mps, "empty_cache"):
+        try: torch.mps.empty_cache()
+        except Exception: pass
+    elif DEVICE == "cuda" and hasattr(torch.cuda, "empty_cache"):
+        try: torch.cuda.empty_cache()
+        except Exception: pass
+
+
+async def _idle_watcher() -> None:
+    """Background tick that unloads the model when idle for too long.
+    Skipped entirely when KEEP_WARM=true (manual override)."""
+    if KEEP_WARM:
+        print(f"[dia] idle-watcher disabled (KEEP_WARM=true)")
+        return
+    print(f"[dia] idle-watcher active (unload after {IDLE_UNLOAD_SECONDS}s idle)")
+    while True:
+        await asyncio.sleep(IDLE_TICK_SECONDS)
+        if _model is None:
+            continue
+        idle = time.monotonic() - _last_request_at
+        if idle > IDLE_UNLOAD_SECONDS:
+            async with _sem:
+                if _model is not None:  # re-check inside sem
+                    await _unload_model()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _leo_audio, _sarah_audio, _clone_prefix_text, _clone_audio, _unload_task
+
+    # Load reference audio for voice cloning (kept resident — only ~100KB).
     try:
         _leo_audio = _load_audio_mono(LEO_REF_AUDIO)
         _sarah_audio = _load_audio_mono(SARAH_REF_AUDIO)
-        # Concatenate for the audio prompt (LEO first then SARAH) — order must
-        # match the prefix-text speaker order ([S1] then [S2]).
         _clone_audio = np.concatenate([_leo_audio, _sarah_audio]).astype(np.float32)
         _clone_prefix_text = f"[S1] {LEO_REF_TEXT.strip()} [S2] {SARAH_REF_TEXT.strip()} "
         print(
@@ -125,29 +199,20 @@ async def lifespan(app: FastAPI):
         _leo_audio = _sarah_audio = _clone_audio = None
         _clone_prefix_text = ""
 
-    # Warmup
-    try:
-        async with _sem:
-            warm_text = ["[S1] Warming up. [S2] Ready."]
-            inputs = await asyncio.to_thread(
-                lambda: _processor(text=warm_text, padding=True, return_tensors="pt").to(DEVICE)
-            )
-            with torch.no_grad():
-                _ = await asyncio.to_thread(
-                    lambda: _model.generate(
-                        **inputs,
-                        max_new_tokens=256,
-                        guidance_scale=3.0,
-                        temperature=1.0,
-                        top_p=0.9,
-                        top_k=45,
-                    )
-                )
-        _warmed = True
-        print(f"[dia] warmup OK in {time.perf_counter()-t0:.1f}s total, cloning={'on' if _clone_audio is not None else 'off'}")
-    except Exception as e:
-        print(f"[dia] warmup failed: {e}")
+    # Cold-load the model at startup (we'd be cold otherwise).
+    async with _sem:
+        await _load_processor_and_model_and_warm()
+
+    # Kick off the idle watcher (no-op if KEEP_WARM=true)
+    _unload_task = asyncio.create_task(_idle_watcher())
+
     yield
+
+    # Clean shutdown
+    if _unload_task and not _unload_task.done():
+        _unload_task.cancel()
+        try: await _unload_task
+        except asyncio.CancelledError: pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -174,17 +239,41 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    if not _warmed:
-        return JSONResponse({"ok": False, "warmed": False}, status_code=503)
+    # warm = model is in memory and warmed up; cold = unloaded due to idle.
+    # Both are OK states — cold just means next /tts pays cold-load latency
+    # (~10s). Returning 200 in cold state so callers know the sidecar is
+    # reachable; they choose whether to pay cold-load cost or pick a different
+    # engine.
+    state = "warm" if _warmed and _model is not None else "cold"
+    idle_seconds = round(time.monotonic() - _last_request_at, 1)
     return {
         "ok": True,
+        "state": state,
+        "warmed": _warmed,
         "model": MODEL_CHECKPOINT,
         "device": DEVICE,
         "dtype": DTYPE_STR,
         "voice_cloning": _clone_audio is not None,
         "leo_ref_seconds": float(len(_leo_audio) / 44100) if _leo_audio is not None else None,
         "sarah_ref_seconds": float(len(_sarah_audio) / 44100) if _sarah_audio is not None else None,
+        "idle_seconds": idle_seconds,
+        "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        "keep_warm": KEEP_WARM,
+        "last_unload_ago_s": round(time.monotonic() - _idle_unloaded_at, 1) if _idle_unloaded_at else None,
     }
+
+
+@app.post("/admin/unload")
+async def admin_unload(request: Request):
+    """Force-unload the model NOW. Used by atelier-status CLI and by peer
+    sidecars before they load (memory courtesy). Idempotent — returns 200
+    whether or not a model was actually loaded."""
+    _check_auth(request)
+    was_loaded = _model is not None
+    if was_loaded:
+        async with _sem:
+            await _unload_model()
+    return {"unloaded": was_loaded, "model": MODEL_CHECKPOINT, "device": DEVICE}
 
 
 class TtsReq(BaseModel):
@@ -199,12 +288,21 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
+    global _last_request_at
     _check_auth(request)
-    if not _warmed:
-        raise HTTPException(503, "warming up")
 
     user_text = _normalize_script(req.text)
     use_clone = req.use_voice_clone and _clone_audio is not None
+
+    # Cold-load if needed (model was unloaded due to idle). Pays ~10s
+    # cold-load latency, then warm for IDLE_UNLOAD_SECONDS again.
+    if _model is None or not _warmed:
+        print(f"[dia] cold-load triggered by /tts (was unloaded {round(time.monotonic() - _idle_unloaded_at, 1) if _idle_unloaded_at else '?'}s ago)")
+        async with _sem:
+            await _load_processor_and_model_and_warm()
+        if not _warmed:
+            raise HTTPException(503, "cold-load failed; see server logs")
+    _last_request_at = time.monotonic()
 
     if use_clone:
         full_text = _clone_prefix_text + user_text

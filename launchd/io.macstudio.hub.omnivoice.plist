@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HF_HOME</key>
+		<string>/Users/gyasisutton/models/hf-cache</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/omnivoice-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+		<string>1</string>
+		<key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key>
+		<string>0.0</string>
+		<key>IDLE_UNLOAD_SECONDS</key>
+		<string>240</string>
+		<key>KEEP_WARM</key>
+		<string>false</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.omnivoice</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/omnivoice-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8770</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/omnivoice-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/omnivoice-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/omnivoice-sidecar</string>
+</dict>
+</plist>
