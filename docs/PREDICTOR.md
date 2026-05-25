@@ -53,7 +53,8 @@ compute stats across the fleet.
 ## Status / roadmap
 - ✅ module + store + priors + Bayesian blend + `/estimate` + `/report` + export/stats
 - ✅ live TTS synths auto-recorded (governor tails sidecar logs)
-- ⏳ gateway → `/report` integration for real LLM runs (then thinking-model output learns from reality)
+- ✅ gateway → `/report`: githubawesome `podcast.ts` reports its Gemini script-gen runs
+  (cloud LLM) — verified: gemini-2.5-flash learned at ~90 tok/s, /estimate now empirical+prior
 - ⏳ on-demand `/benchmark?model=X` (governor fires a tiny generate → seeds tps)
 - ⏳ host/device auto-detection + per-host rate buckets (CPU vs GPU vs cloud)
 - ⏳ live network-latency measurement for the cloud/Claude fixed cost
