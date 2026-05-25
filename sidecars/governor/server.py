@@ -45,13 +45,19 @@ SIDECAR_BASE = {
     "dia": "http://127.0.0.1:8769",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
+SIDECAR_LOGS = {
+    "omnivoice": Path.home() / "Library/Logs/omnivoice-sidecar.out.log",
+    "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
+    "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
+}
 
 _state = {
     "updated_at": None, "level": "ok", "free_gb": None, "resident_gb": None,
     "swapouts": None, "tenants": [], "alerts": [],
 }
-_recent_calls = collections.deque(maxlen=50)
-_recent_events = collections.deque(maxlen=50)
+_recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log)
+_recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
+_recent_synths = collections.deque(maxlen=50)   # per-call sidecar TTS telemetry (from sidecar logs)
 _last_spill = None
 _log_tail_alive = False
 _prev_swapouts = None
@@ -197,19 +203,59 @@ async def _log_tailer():
             print(f"[governor] log tailer error: {e}", flush=True)
             await asyncio.sleep(5)
 
+# Per-call sidecar TTS telemetry: every sidecar logs a line like
+#   [tts] chars=293 14.74s rtf=0.82x        (omnivoice)
+#   [tts] voice=af_bella chars=80 6.68s     (kokoro)
+# Tail those so synth calls are visible in the governor — not siloed in each
+# sidecar's private log (Constitution I: one observable pane, no black boxes).
+_TTS = re.compile(r'\[tts\].*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(?P<rtf>[\d.]+)x)?')
+
+async def _tail_sidecar(name: str, path: Path):
+    while True:
+        try:
+            if not path.exists():
+                await asyncio.sleep(5)
+                continue
+            with path.open("r", errors="replace") as f:
+                f.seek(0, os.SEEK_END)
+                inode = os.fstat(f.fileno()).st_ino
+                while True:
+                    line = f.readline()
+                    if line:
+                        m = _TTS.search(line)
+                        if m:
+                            _recent_synths.append({
+                                "at": time.strftime("%H:%M:%S"), "ts": time.time(),
+                                "engine": name, "chars": int(m.group("chars")),
+                                "seconds": float(m.group("sec")),
+                                "rtf": float(m.group("rtf")) if m.group("rtf") else None,
+                            })
+                        continue
+                    await asyncio.sleep(1)
+                    try:
+                        if path.exists() and os.stat(path).st_ino != inode:
+                            break
+                    except OSError:
+                        break
+        except Exception as e:
+            print(f"[governor] sidecar tail {name} error: {e}", flush=True)
+            await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    t1 = asyncio.create_task(_poller())
-    t2 = asyncio.create_task(_log_tailer())
+    tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer())]
+    for nm, p in SIDECAR_LOGS.items():
+        tasks.append(asyncio.create_task(_tail_sidecar(nm, p)))
     yield
-    for t in (t1, t2):
+    for t in tasks:
         t.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.2-make-room"}
+    return {"ok": True, "service": "governor", "version": "0.3-sidecar-telemetry"}
 
 @app.get("/readyz")
 def readyz():
@@ -224,7 +270,7 @@ def pressure():
 @app.get("/telemetry")
 def telemetry():
     return {"recent_calls": list(_recent_calls), "recent_events": list(_recent_events),
-            "last_spill": _last_spill}
+            "recent_synths": list(_recent_synths), "last_spill": _last_spill}
 
 
 def _ollama_recently_active(window: float = 15.0) -> bool:
