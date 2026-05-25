@@ -6,8 +6,18 @@
       "ref_text": "I will rip open Ultra Magnus and every other Autobot until the matrix has been destroyed.",
       "params": { "num_step": 48, "guidance_scale": 2.0, "class_temperature": 0.3 },
       "post_fx": "none",
-      "note": "Raw clone captured it perfectly (user-confirmed 2026-05-25). Pitch-shift (-3) and metallic ffmpeg FX both DEGRADED it — do not over-process.",
-      "source": "Transformers: The Movie — Galvatron (Megatron reborn, voiced by Leonard Nimoy). Ref clip from YouTube qaNWmd_QyA0 ~5:40.",
+      "note": "Raw clone captured it perfectly (user-confirmed 2026-05-25). Pitch-shift and metallic FX both DEGRADED it.",
+      "source": "Transformers: The Movie — Galvatron (Megatron reborn, Leonard Nimoy). YouTube qaNWmd_QyA0 ~5:40.",
+      "added": "2026-05-25"
+    },
+    "pauls_tutor": {
+      "engine": "omnivoice",
+      "ref_audio": "~/models/voice-refs/pauls_tutor_ref.wav",
+      "ref_text": "To avoid making rhythmic noises which attract the sandworms, the Fremen cross desert spaces using the sand walk, a dance-like motion with irregular rhythm which emulates the natural sounds of the desert.",
+      "params": { "num_step": 48, "guidance_scale": 2.0, "class_temperature": 0.3 },
+      "post_fx": "none",
+      "note": "Calm documentary-narrator voice. Worked example for the /voice-clone skill, end-to-end test 2026-05-25.",
+      "source": "YouTube AHqIUDZBRM4 first ~15s (Dune / Fremen documentary narration).",
       "added": "2026-05-25"
     }
   }
