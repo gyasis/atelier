@@ -23,6 +23,7 @@ import asyncio
 import collections
 import os
 import re
+import sqlite3
 import statistics
 import subprocess
 import time
@@ -32,6 +33,8 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+import predictor  # modular per-model ETA predictor (persistent, Bayesian)
 
 TOTAL_RAM_GB = float(os.environ.get("ATELIER_TOTAL_RAM_GB", "64"))
 CLIFF_GB = float(os.environ.get("ATELIER_CLIFF_GB", "55"))   # swap onset
@@ -213,17 +216,27 @@ _TTS = re.compile(r'\[tts\].*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(
 _NS = re.compile(r'num_step=(\d+)')
 _backfilled: set = set()  # log paths whose tail we've already seeded into _recent_synths
 
-def _ingest_tts(name: str, line: str):
+def _ingest_tts(name: str, line: str, persist: bool = True):
     m = _TTS.search(line)
     if not m:
         return
     ns = _NS.search(line)
+    chars = int(m.group("chars"))
+    secs = float(m.group("sec"))
+    num_step = int(ns.group(1)) if ns else None
     _recent_synths.append({
         "at": time.strftime("%H:%M:%S"), "ts": time.time(), "engine": name,
-        "chars": int(m.group("chars")), "seconds": float(m.group("sec")),
+        "chars": chars, "seconds": secs,
         "rtf": float(m.group("rtf")) if m.group("rtf") else None,
-        "num_step": int(ns.group(1)) if ns else None,
+        "num_step": num_step,
     })
+    if persist and chars:  # live synths feed the predictor; backfill (persist=False) does not
+        try:
+            model = f"{name}:ns{num_step}" if num_step else name
+            predictor.record(kind="tts", model=model, seconds=secs, in_units=chars,
+                             device="coreml/mps" if name == "kokoro" else "mps")
+        except Exception as e:
+            print(f"[governor] predictor.record(tts) failed: {e}", flush=True)
 
 async def _tail_sidecar(name: str, path: Path):
     while True:
@@ -237,7 +250,7 @@ async def _tail_sidecar(name: str, path: Path):
                 # would otherwise cold-start empty).
                 if str(path) not in _backfilled:
                     for ln in [x for x in f.readlines() if "[tts]" in x][-30:]:
-                        _ingest_tts(name, ln)
+                        _ingest_tts(name, ln, persist=False)
                     _backfilled.add(str(path))
                 f.seek(0, os.SEEK_END)
                 inode = os.fstat(f.fileno()).st_ino
@@ -270,7 +283,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.5-estimate-backfill-numstep"}
+    return {"ok": True, "service": "governor", "version": "0.6-predictor"}
 
 @app.get("/readyz")
 def readyz():
@@ -289,35 +302,62 @@ def telemetry():
 
 
 @app.get("/estimate")
-def estimate(engine: str, chars: int = 0, num_step: int | None = None):
-    """ETA for a TTS synth, learned from recorded telemetry (median seconds/char
-    over recent synths for that engine). The data comes from /telemetry's
-    recent_synths — every synth teaches the estimate.
+def estimate(engine: str = "", model: str = "", kind: str = "", chars: int = 0,
+             out_tokens: int = 0, num_step: int | None = None,
+             location: str = "local", state: str = "warm"):
+    """Predict ETA via the modular predictor (per-model Bayesian, learns from
+    accumulated runs). TTS: ?engine=omnivoice&chars=N[&num_step=48|64]. LLM:
+    ?model=<name>[&out_tokens=N][&location=local|cloud][&state=warm|cold]."""
+    if not kind:
+        kind = "tts" if engine in ("omnivoice", "kokoro", "dia") else "llm"
+    if kind == "tts":
+        mdl = model or engine
+        if num_step:
+            mdl = f"{mdl}:ns{num_step}"
+        return predictor.predict(kind="tts", model=mdl, in_units=chars, state=state)
+    return predictor.predict(kind="llm", model=(model or engine or "unknown"),
+                             out_units=(out_tokens or None), location=location, state=state)
 
-    Ollama LLM reply-time is NOT modeled here: output length is unknown ahead of
-    time, so it needs tokens/s (enable OLLAMA_DEBUG_LOG_REQUESTS=true) plus an
-    expected-output-length guess. Returned as a note, not a number."""
-    if engine == "ollama":
-        return {"engine": "ollama", "est_seconds": None,
-                "note": "LLM reply time = expected_output_tokens / tokens_per_sec. "
-                        "Enable OLLAMA_DEBUG_LOG_REQUESTS=true so the governor can learn tokens/s."}
-    samples = [s for s in _recent_synths if s["engine"] == engine and s.get("chars")]
-    used_ns = None
-    if num_step is not None:
-        ns_samples = [s for s in samples if s.get("num_step") == num_step]
-        if ns_samples:
-            samples, used_ns = ns_samples, num_step
-    if not samples:
-        return {"engine": engine, "input_chars": chars, "est_seconds": None,
-                "samples": 0, "note": "no telemetry yet for this engine — run a synth first"}
-    rates = sorted(s["seconds"] / s["chars"] for s in samples)
-    spc = statistics.median(rates)
-    return {"engine": engine, "input_chars": chars, "num_step": used_ns,
-            "est_seconds": round(chars * spc, 1) if chars else None,
-            "sec_per_char": round(spc, 4), "samples": len(samples),
-            "range_s_per_char": [round(rates[0], 4), round(rates[-1], 4)],
-            "note": (f"filtered to num_step={used_ns}" if used_ns
-                     else "blended over recent synths — pass ?num_step=48|64 to split")}
+
+class RunReport(BaseModel):
+    kind: str                       # "tts" | "llm"
+    model: str
+    seconds: float
+    in_units: int | None = None     # chars (tts) or prompt tokens (llm)
+    out_units: int | None = None    # audio-seconds (tts) or output tokens (llm)
+    rate: float | None = None
+    location: str = "local"
+    host: str = "mac-studio"
+    device: str = "mps"
+    state: str = "warm"
+    net_latency_ms: float = 0.0
+    queue_depth: int = 0
+
+
+@app.post("/report")
+def report(r: RunReport):
+    """Feed a completed run into the predictor so it sharpens. The gateway POSTs its
+    real generate stats here (e.g. Ollama eval_count/eval_duration) to learn
+    tokens/s + output distributions — including thinking models."""
+    predictor.record(**r.model_dump())
+    return {"ok": True, "recorded": r.model_dump()}
+
+
+@app.get("/predictor/stats")
+def predictor_stats():
+    """What the predictor has learned per (kind, model) — the shareable compute-stats base."""
+    return {"runs": predictor.stats(), "db": str(predictor.DB)}
+
+
+@app.get("/predictor/export")
+def predictor_export():
+    """Export the full run dataset (JSON) — portable compute-stats, sharable across
+    servers / other local models. Re-import elsewhere by POSTing rows to /report."""
+    c = sqlite3.connect(str(predictor.DB))
+    c.row_factory = sqlite3.Row
+    rows = [dict(x) for x in c.execute("SELECT * FROM runs ORDER BY ts").fetchall()]
+    c.close()
+    return {"count": len(rows), "schema": "atelier-predictor-v1", "runs": rows}
 
 
 def _ollama_recently_active(window: float = 15.0) -> bool:
