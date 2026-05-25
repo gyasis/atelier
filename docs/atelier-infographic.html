@@ -98,6 +98,28 @@
   code{font-family:var(--mono); font-size:.9em; background:var(--paper-2);
     padding:1px 5px; border:1px solid var(--hair);}
 
+  /* ---- memory budget ---- */
+  .budget{margin:22px 0 26px;}
+  .budget .track{position:relative; height:48px; background:var(--paper-2);
+    border:1px solid var(--hair); display:flex; font-family:var(--mono); font-size:12px;}
+  .budget .seg{display:flex; align-items:center; justify-content:center; color:#fff;
+    border-right:1px solid rgba(255,255,255,.35); font-weight:700;}
+  .budget .seg.ollama{background:var(--m-text); flex:0 0 31%;}
+  .budget .seg.sidecars{background:var(--m-audio); flex:0 0 16%;}
+  .budget .seg.free{background:transparent; color:var(--muted);}
+  .budget .cliff{position:absolute; top:-7px; bottom:-7px; left:86%; width:2px; background:var(--ink);}
+  .budget .cliff span{position:absolute; top:-19px; left:8px; font-family:var(--mono);
+    font-size:10px; letter-spacing:.06em; color:var(--ink); white-space:nowrap;}
+  .budget .legend{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:12px;}
+
+  /* ---- model states ---- */
+  .states{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:14px;}
+  .st{border:1px solid var(--hair); background:var(--paper); padding:14px 16px; border-left:5px solid var(--c2);}
+  .st.idle{--c2:var(--m-image);} .st.busy{--c2:var(--accent);} .st.cold{--c2:var(--muted);}
+  .st b{font-family:var(--mono); font-size:13px; letter-spacing:.08em; text-transform:uppercase; color:var(--c2);}
+  .st span{font-size:13.5px; color:#3a372f; display:block; margin-top:5px;}
+  .st em{font-style:normal; font-weight:700;}
+
   /* ---- stack chips ---- */
   .stack{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:22px;}
   .scol h4{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase;
@@ -173,9 +195,49 @@
     </div>
   </section>
 
-  <!-- 3 media -->
+  <!-- 03 memory governor -->
   <section>
-    <div class="sechead"><span class="secno">03</span><h2>What runs here — by medium</h2></div>
+    <div class="sechead"><span class="secno">03</span><h2>The memory governor</h2></div>
+    <p class="lede">Two tenants share 64 GB — Ollama's LLMs and Atelier's sidecars. The
+      governor is <b>job-aware</b>: it reclaims only what's truly idle, queues contention,
+      and <b>never evicts a model that's mid-job</b>.</p>
+
+    <div class="budget">
+      <div class="track">
+        <div class="seg ollama">Ollama&nbsp;·&nbsp;~20&nbsp;GB</div>
+        <div class="seg sidecars">sidecars&nbsp;·&nbsp;~10</div>
+        <div class="seg free">headroom</div>
+        <div class="cliff"><span>~55&nbsp;GB · swap cliff</span></div>
+      </div>
+      <div class="legend">Cross the cliff and macOS silently pages to NVMe — a 5-minute render becomes a 2-hour hang, no error.</div>
+    </div>
+
+    <p class="lede" style="font-size:16px"><b>Loaded ≠ free.</b> Every model is in one of three states:</p>
+    <div class="states">
+      <div class="st idle"><b>idle</b><span>loaded, doing nothing → reclaimable</span></div>
+      <div class="st busy"><b>busy</b><span>mid-inference / mid-render → <em>protected, never evicted</em></span></div>
+      <div class="st cold"><b>cold</b><span>unloaded → costs nothing</span></div>
+    </div>
+
+    <div class="steps" style="margin-top:26px">
+      <div class="step"><div class="n">1 · QUEUE</div><h4>Don't kill — line up</h4>
+        <p>A request for a <em>busy</em> model gets back-pressure — <em>"there's a line, position N"</em> — and waits. The default, safe path.</p></div>
+      <div class="step"><div class="n">2 · FORCE</div><h4>Preempt — human-gated</h4>
+        <p>A <code>force</code> flag can drop a running job and evict now — but only with explicit human approval. Emergencies, never automatic.</p></div>
+      <div class="step"><div class="n">3 · RECLAIM</div><h4>make-room + watcher</h4>
+        <p>On-demand before a heavy job, plus a silent watcher near the swap cliff. Both evict <em>only idle</em> models — the overnight render is safe.</p></div>
+      <div class="step"><div class="n">4 · ROUTE</div><h4>One scheduler, two tenants</h4>
+        <p>Sits in front of Ollama + sidecars, knows what each is <em>doing</em>, routes by media type, reclaims from genuine idle only.</p></div>
+    </div>
+
+    <blockquote style="margin-top:28px">Never evict what's working. Queue the newcomer. Reclaim only idle. Force only with a human in the loop.</blockquote>
+    <p style="font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--muted);margin-top:10px">
+      STATUS · per-sidecar idle-unload live · job-aware governor in design</p>
+  </section>
+
+  <!-- 04 media -->
+  <section>
+    <div class="sechead"><span class="secno">04</span><h2>What runs here — by medium</h2></div>
     <p class="lede">Each workload is one sidecar, one port, hot-swappable.</p>
     <div class="media" style="margin-top:24px">
 
@@ -241,7 +303,7 @@
 
   <!-- 4 topology -->
   <section>
-    <div class="sechead"><span class="secno">04</span><h2>Topology</h2></div>
+    <div class="sechead"><span class="secno">05</span><h2>Topology</h2></div>
     <div class="topo">                         <b>LAN — 192.168.0.159</b>
                                │
         ┌──────────────────────┴───────────────────────┐
@@ -268,7 +330,7 @@
 
   <!-- 5 contract -->
   <section>
-    <div class="sechead"><span class="secno">05</span><h2>The sidecar contract</h2></div>
+    <div class="sechead"><span class="secno">06</span><h2>The sidecar contract</h2></div>
     <p class="lede">Every workload is a small FastAPI app following one shape.</p>
     <div class="steps" style="margin-top:24px">
       <div class="step"><div class="n">HTTP</div><h4>Uniform surface</h4>
@@ -289,7 +351,7 @@
 
   <!-- 6 stack -->
   <section>
-    <div class="sechead"><span class="secno">06</span><h2>Tech stack</h2></div>
+    <div class="sechead"><span class="secno">07</span><h2>Tech stack</h2></div>
     <div class="stack">
       <div class="scol"><h4>Serving</h4>
         <span class="chip">FastAPI</span><span class="chip">uvicorn</span>
@@ -315,7 +377,7 @@
 
   <!-- 7 ops -->
   <section>
-    <div class="sechead"><span class="secno">07</span><h2>Operating the hub</h2></div>
+    <div class="sechead"><span class="secno">08</span><h2>Operating the hub</h2></div>
     <div class="ops">
       <div class="op"><h4>deploy/install.sh</h4>
         <p>Fresh-Mac bootstrap — venvs, pinned deps, symlink sidecars, copy plists, fetch
@@ -331,7 +393,7 @@
 
   <!-- 8 ambitions -->
   <section>
-    <div class="sechead"><span class="secno">08</span><h2>The ambitions</h2></div>
+    <div class="sechead"><span class="secno">09</span><h2>The ambitions</h2></div>
     <div class="ambitions">
       <div class="amb"><div><h4>Every medium under one contract</h4>
         <p>Text, audio (TTS + ASR), image, video, embeddings — each a uniform sidecar, each hot-swappable.</p></div></div>
