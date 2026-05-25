@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atelier — the household AI atelier</title>
+<style>
+  :root{
+    --paper:#f3efe6; --paper-2:#ebe5d8; --ink:#23211c; --muted:#6f6857;
+    --hair:#ccc4b3; --accent:#b9542d;
+    --m-text:#5b6e8c; --m-audio:#b9542d; --m-asr:#a06a3f;
+    --m-image:#4a7c59; --m-video:#8a4f7d; --m-embed:#b8893b;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    --sans:system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono","Roboto Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--sans); line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:0 32px;}
+  a{color:var(--accent); text-decoration:none;}
+
+  /* ---- masthead ---- */
+  header.mast{padding:64px 0 40px; border-bottom:3px double var(--ink);}
+  .kicker{font-family:var(--mono); font-size:12px; letter-spacing:.32em;
+    text-transform:uppercase; color:var(--muted);}
+  h1.title{font-family:var(--serif); font-weight:700; font-size:clamp(56px,11vw,128px);
+    line-height:.92; letter-spacing:-.02em; margin:14px 0 8px;}
+  .tag{font-family:var(--serif); font-style:italic; font-size:clamp(20px,3.2vw,30px);
+    color:var(--ink);}
+  .dek{margin-top:18px; max-width:62ch; font-size:17px; color:#3a372f;}
+  .dateline{margin-top:22px; font-family:var(--mono); font-size:11.5px;
+    letter-spacing:.12em; color:var(--muted); text-transform:uppercase;}
+
+  /* ---- section scaffolding ---- */
+  section{padding:52px 0; border-bottom:1px solid var(--hair);}
+  .sechead{display:flex; align-items:baseline; gap:16px; margin:0 0 26px;}
+  .secno{font-family:var(--mono); font-size:13px; color:var(--accent); font-weight:700;}
+  h2{font-family:var(--serif); font-weight:700; font-size:clamp(26px,4vw,40px);
+    margin:0; letter-spacing:-.01em;}
+  .lede{font-size:18px; max-width:64ch; color:#3a372f;}
+
+  blockquote{font-family:var(--serif); font-style:italic; font-size:clamp(22px,3.4vw,32px);
+    line-height:1.35; margin:0; padding:6px 0 6px 26px; border-left:4px solid var(--accent);
+    color:var(--ink); max-width:30ch;}
+
+  /* ---- spec grid ---- */
+  .specs{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px;
+    background:var(--hair); border:1px solid var(--hair); margin-top:8px;}
+  .spec{background:var(--paper); padding:16px 18px;}
+  .spec .k{font-family:var(--mono); font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--muted);}
+  .spec .v{font-family:var(--serif); font-size:24px; font-weight:700; margin-top:4px;}
+  .spec .v small{font-size:13px; font-weight:400; color:var(--muted);}
+
+  .callout{margin-top:26px; background:#2a2620; color:#f0ebe0; padding:22px 26px;
+    border-left:5px solid var(--accent);}
+  .callout b{color:#f6c89a;}
+  .callout .lbl{font-family:var(--mono); font-size:11px; letter-spacing:.18em;
+    text-transform:uppercase; color:#d8a06f;}
+
+  /* ---- media cards ---- */
+  .media{display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:18px;}
+  .mcard{border:1px solid var(--hair); background:var(--paper); padding:0; overflow:hidden;
+    display:flex; flex-direction:column;}
+  .mcard .bar{height:6px; background:var(--c);}
+  .mcard .body{padding:18px 20px 20px;}
+  .mcard .medium{font-family:var(--mono); font-size:11px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--c); font-weight:700;}
+  .mcard h3{font-family:var(--serif); font-size:25px; margin:6px 0 2px;}
+  .mcard .engine{font-size:13.5px; color:var(--muted);}
+  .mcard .row{display:flex; gap:14px; margin-top:14px; flex-wrap:wrap;
+    font-family:var(--mono); font-size:12px;}
+  .mcard .row span{background:var(--paper-2); padding:3px 9px; border:1px solid var(--hair);}
+  .mcard p{font-size:14px; margin:12px 0 0; color:#3a372f;}
+  .pill{display:inline-block; font-family:var(--mono); font-size:10.5px; font-weight:700;
+    letter-spacing:.06em; padding:2px 8px; border-radius:2px; margin-left:8px; vertical-align:2px;}
+  .pill.prod{background:#234d34; color:#cde7d5;}
+  .pill.fall{background:#5b4a22; color:#f0dca6;}
+  .pill.retired{background:#5a2a2a; color:#f3c4c4;}
+  .pill.planned{background:#33414f; color:#cfe0ee;}
+
+  /* ---- topology ---- */
+  .topo{font-family:var(--mono); font-size:13px; background:#2a2620; color:#e8e1d3;
+    padding:26px; overflow-x:auto; line-height:1.5; white-space:pre;}
+  .topo b{color:#f6c89a;}
+
+  /* ---- contract / steps ---- */
+  .steps{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:18px;}
+  .step{border-top:3px solid var(--ink); padding-top:14px;}
+  .step .n{font-family:var(--mono); font-size:12px; color:var(--accent); font-weight:700;}
+  .step h4{font-family:var(--serif); font-size:20px; margin:6px 0 6px;}
+  .step p{font-size:14px; margin:0; color:#3a372f;}
+  code{font-family:var(--mono); font-size:.9em; background:var(--paper-2);
+    padding:1px 5px; border:1px solid var(--hair);}
+
+  /* ---- stack chips ---- */
+  .stack{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:22px;}
+  .scol h4{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--muted); border-bottom:1px solid var(--hair); padding-bottom:6px; margin:0 0 10px;}
+  .chip{display:inline-block; font-size:13px; background:var(--paper-2);
+    border:1px solid var(--hair); padding:4px 10px; margin:0 6px 8px 0;}
+
+  /* ---- ops cards ---- */
+  .ops{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:18px;}
+  .op{background:var(--paper-2); border:1px solid var(--hair); padding:18px 20px;}
+  .op code{background:var(--paper);}
+  .op h4{font-family:var(--mono); font-size:15px; margin:0 0 8px; color:var(--accent);}
+  .op p{font-size:14px; margin:0; color:#3a372f;}
+
+  /* ---- ambitions ---- */
+  .ambitions{counter-reset:amb; display:grid; gap:4px;}
+  .amb{display:flex; gap:20px; padding:18px 0; border-bottom:1px solid var(--hair);}
+  .amb:before{counter-increment:amb; content:counter(amb,decimal-leading-zero);
+    font-family:var(--serif); font-size:34px; font-weight:700; color:var(--accent);
+    min-width:54px;}
+  .amb h4{font-family:var(--serif); font-size:21px; margin:0 0 4px;}
+  .amb p{margin:0; font-size:15px; color:#3a372f;}
+  .road{margin-top:24px; font-size:15px;}
+  .road li{margin:6px 0;}
+
+  footer{padding:40px 0 64px; font-family:var(--mono); font-size:12px; color:var(--muted);}
+  footer .big{font-family:var(--serif); font-size:22px; color:var(--ink); font-style:italic; margin-bottom:10px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="mast">
+    <div class="kicker">Internal · LAN-only · Mac Studio M1 Max</div>
+    <h1 class="title">Atelier</h1>
+    <div class="tag">One Mac Studio. Every medium.</div>
+    <p class="dek">A household AI compute box that hosts text, audio, image, and video
+      inference as a fleet of uniform Python sidecars — so any client on the network hits
+      <em>one HTTP endpoint per workload</em> instead of running models in-browser.
+      <strong>Atelier</strong> is French for <em>workshop</em>.</p>
+    <div class="dateline">System overview · 2026-05-25</div>
+  </header>
+
+  <!-- 1 thesis -->
+  <section>
+    <div class="sechead"><span class="secno">01</span><h2>The thesis</h2></div>
+    <blockquote>Centralize every model on the box that has the memory. Keep clients thin.
+      The network is the API.</blockquote>
+    <p class="lede" style="margin-top:22px">Running models in-browser or re-downloading
+      weights per app wastes the one scarce resource on this hardware: unified memory.
+      Atelier is deliberately two things at once — a <b>production engine</b> the
+      githubawesome podcast depends on daily, and an <b>experimentation platform</b>:
+      "a bigger ComfyUI for all media models," where a new TTS, image, or video model
+      slots in behind the same contract and gets A/B-compared.</p>
+  </section>
+
+  <!-- 2 host -->
+  <section>
+    <div class="sechead"><span class="secno">02</span><h2>The host</h2></div>
+    <div class="specs">
+      <div class="spec"><div class="k">Chip</div><div class="v">M1 Max <small>10-core CPU · 32-core GPU</small></div></div>
+      <div class="spec"><div class="k">Memory</div><div class="v">64 GB <small>unified · ~400 GB/s</small></div></div>
+      <div class="spec"><div class="k">Disk</div><div class="v">2.9 TB <small>free of 3.6</small></div></div>
+      <div class="spec"><div class="k">OS</div><div class="v">macOS 15.5 <small>Metal 3 · arm64</small></div></div>
+      <div class="spec"><div class="k">LAN</div><div class="v">.0.159 <small>ssh: gyasisutton</small></div></div>
+    </div>
+    <div class="callout">
+      <div class="lbl">The defining constraint</div>
+      <p style="margin:8px 0 0">Apple Silicon has <b>no hard OOM</b> like CUDA. Exceed
+      ~55 GB resident and macOS silently pages to NVMe — a 5-minute render becomes a
+      2-hour hang with no error. Memory contention, not disk or compute, is the ceiling.
+      <b>Every design decision below exists to respect it.</b></p>
+    </div>
+  </section>
+
+  <!-- 3 media -->
+  <section>
+    <div class="sechead"><span class="secno">03</span><h2>What runs here — by medium</h2></div>
+    <p class="lede">Each workload is one sidecar, one port, hot-swappable.</p>
+    <div class="media" style="margin-top:24px">
+
+      <div class="mcard" style="--c:var(--m-text)"><div class="bar"></div><div class="body">
+        <div class="medium">Text · LLM &amp; Embeddings</div>
+        <h3>Ollama</h3><div class="engine">gemma · qwen3:32b · nomic-embed-text</div>
+        <div class="row"><span>:11434</span><span>co-resident</span></div>
+        <p>Script generation, chat, retrieval embeddings. Managed alongside Atelier, not inside it.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-audio)"><div class="bar"></div><div class="body">
+        <div class="medium">Audio · TTS</div>
+        <h3>OmniVoice <span class="pill prod">PRIMARY</span></h3>
+        <div class="engine">k2-fsa/OmniVoice · Diffusion LM · PyTorch MPS</div>
+        <div class="row"><span>:8770</span><span>~0.6–1× RTF</span><span>instruct-driven</span></div>
+        <p>The natural-voice engine. Accent / pitch / gender steered by an instruct string —
+          no per-voice cloning. Drives the podcast's two hosts.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-audio)"><div class="bar"></div><div class="body">
+        <div class="medium">Audio · TTS</div>
+        <h3>Kokoro <span class="pill fall">FALLBACK</span></h3>
+        <div class="engine">kokoro-onnx · CoreML / MPS</div>
+        <div class="row"><span>:8765</span><span>~0.6 s/line</span><span>twin on Linux :18765</span></div>
+        <p>Fast, fixed-voice library. Mac-offline resilience via a second instance on the Linux box.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-audio)"><div class="bar"></div><div class="body">
+        <div class="medium">Audio · TTS</div>
+        <h3>Dia 1.6B <span class="pill retired">RETIRED · LIVE</span></h3>
+        <div class="engine">nari-labs/Dia · PyTorch MPS</div>
+        <div class="row"><span>:8769</span><span>~10× RTF</span><span>cloning</span></div>
+        <p>Expressive multi-speaker with <code>(laughs)</code> cues + voice cloning. Too slow
+          for live; kept for overnight batch work.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-asr)"><div class="bar"></div><div class="body">
+        <div class="medium">Audio · ASR</div>
+        <h3>Whisper <span class="pill planned">PLANNED</span></h3>
+        <div class="engine">mlx-whisper</div>
+        <div class="row"><span>:8766</span><span>transcription</span></div>
+        <p>Speech-to-text for clip verification and transcript pulls. Next on the roadmap.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-image)"><div class="bar"></div><div class="body">
+        <div class="medium">Image</div>
+        <h3>ComfyUI</h3>
+        <div class="engine">SDXL · Flux · SD3.5 · PyTorch MPS</div>
+        <div class="row"><span>:8188</span><span>+ mflux :8767</span></div>
+        <p>Node-graph image generation. Optional <code>mflux</code> MLX sidecar for fast Flux.</p>
+      </div></div>
+
+      <div class="mcard" style="--c:var(--m-video)"><div class="bar"></div><div class="body">
+        <div class="medium">Video</div>
+        <h3>ComfyUI · Wan2.1 <span class="pill prod">VERIFIED</span></h3>
+        <div class="engine">Wan2.1 1.3B + 14B Q4 GGUF</div>
+        <div class="row"><span>:8188</span><span>text-to-video</span><span>LTX / Hunyuan pending</span></div>
+        <p>Text-to-video on the same ComfyUI instance. 14B Q4 cinematic clips verified 2026-05-23.</p>
+      </div></div>
+
+    </div>
+  </section>
+
+  <!-- 4 topology -->
+  <section>
+    <div class="sechead"><span class="secno">04</span><h2>Topology</h2></div>
+    <div class="topo">                         <b>LAN — 192.168.0.159</b>
+                               │
+        ┌──────────────────────┴───────────────────────┐
+        │            MAC STUDIO  ·  Atelier             │
+        │                                               │
+        │   launchd  io.macstudio.hub.*                 │
+        │   ┌─────────────┬─────────────┬────────────┐  │
+        │   │ omnivoice   │ kokoro      │ dia        │  │
+        │   │   :8770     │   :8765     │   :8769    │  │
+        │   ├─────────────┼─────────────┴────────────┤  │
+        │   │ comfyui     │ ollama (co-resident)     │  │
+        │   │   :8188     │   :11434                 │  │
+        │   └─────────────┴──────────────────────────┘  │
+        └──────────────────────┬───────────────────────┘
+                               │  HTTP  (/healthz /readyz /tts …)
+                               ▼
+        ┌───────────────────────────────────────────────┐
+        │   LINUX BOX  ·  SvelteKit gateway             │
+        │   githubawesome · Radio-Mode podcast          │
+        │   TTS chain:  omnivoice → kokoro-mac → kokoro-linux
+        │   + kokoro-local :18765  (Mac-offline twin)   │
+        └───────────────────────────────────────────────┘</div>
+  </section>
+
+  <!-- 5 contract -->
+  <section>
+    <div class="sechead"><span class="secno">05</span><h2>The sidecar contract</h2></div>
+    <p class="lede">Every workload is a small FastAPI app following one shape.</p>
+    <div class="steps" style="margin-top:24px">
+      <div class="step"><div class="n">HTTP</div><h4>Uniform surface</h4>
+        <p><code>/healthz</code> · <code>/readyz</code> · <code>/tts</code> ·
+          <code>/admin/unload</code>. One inference at a time —
+          <code>asyncio.Semaphore(1)</code> single-flight.</p></div>
+      <div class="step"><div class="n">RUNTIME</div><h4>uv + Metal</h4>
+        <p>A <code>uv</code> venv (Python 3.12) per sidecar. PyTorch on <b>MPS</b>, or
+          ONNX/CoreML, or MLX — whatever the engine needs.</p></div>
+      <div class="step"><div class="n">MEMORY</div><h4>Idle-unload economy</h4>
+        <p>Server stays up; the model unloads after <code>IDLE_UNLOAD_SECONDS</code> and
+          frees the memory. Don't fill 64 GB with idle trash.</p></div>
+      <div class="step"><div class="n">LAUNCHD</div><h4>Managed service</h4>
+        <p><code>RunAtLoad</code> + <code>KeepAlive</code>, wrapped in
+          <code>caffeinate -i</code> (defeats App Nap), with MPS-fallback env in the plist.</p></div>
+    </div>
+  </section>
+
+  <!-- 6 stack -->
+  <section>
+    <div class="sechead"><span class="secno">06</span><h2>Tech stack</h2></div>
+    <div class="stack">
+      <div class="scol"><h4>Serving</h4>
+        <span class="chip">FastAPI</span><span class="chip">uvicorn</span>
+        <span class="chip">launchd</span><span class="chip">caffeinate</span></div>
+      <div class="scol"><h4>ML backends</h4>
+        <span class="chip">PyTorch · MPS</span><span class="chip">ONNX · CoreML</span>
+        <span class="chip">MLX</span><span class="chip">GGUF</span></div>
+      <div class="scol"><h4>Models</h4>
+        <span class="chip">OmniVoice</span><span class="chip">kokoro-onnx</span>
+        <span class="chip">Dia 1.6B</span><span class="chip">Wan2.1</span>
+        <span class="chip">SDXL / Flux</span><span class="chip">Ollama LLMs</span></div>
+      <div class="scol"><h4>Tooling</h4>
+        <span class="chip">uv venvs</span><span class="chip">HF Hub</span>
+        <span class="chip">librosa</span><span class="chip">ffmpeg</span></div>
+      <div class="scol"><h4>Gateway</h4>
+        <span class="chip">SvelteKit 5</span><span class="chip">better-sqlite3</span>
+        <span class="chip">MiniSearch</span></div>
+      <div class="scol"><h4>Ops</h4>
+        <span class="chip">install.sh</span><span class="chip">doctor.sh</span>
+        <span class="chip">atelier-status</span></div>
+    </div>
+  </section>
+
+  <!-- 7 ops -->
+  <section>
+    <div class="sechead"><span class="secno">07</span><h2>Operating the hub</h2></div>
+    <div class="ops">
+      <div class="op"><h4>deploy/install.sh</h4>
+        <p>Fresh-Mac bootstrap — venvs, pinned deps, symlink sidecars, copy plists, fetch
+          models, <code>launchctl bootstrap</code> every service.</p></div>
+      <div class="op"><h4>deploy/doctor.sh</h4>
+        <p>Audit: every sidecar has a plist, every plist is installed + loaded + healthy.
+          Exit 1 on any gap — born from the reboot that killed the un-codified OmniVoice.</p></div>
+      <div class="op"><h4>atelier-status</h4>
+        <p>Live health of all sidecars — state, idle seconds, device — plus
+          <code>--unload &lt;name&gt;</code> for manual memory eviction.</p></div>
+    </div>
+  </section>
+
+  <!-- 8 ambitions -->
+  <section>
+    <div class="sechead"><span class="secno">08</span><h2>The ambitions</h2></div>
+    <div class="ambitions">
+      <div class="amb"><div><h4>Every medium under one contract</h4>
+        <p>Text, audio (TTS + ASR), image, video, embeddings — each a uniform sidecar, each hot-swappable.</p></div></div>
+      <div class="amb"><div><h4>Production + experimentation in one box</h4>
+        <p>Ship a single production engine per medium; keep the bench open to A/B a new model the moment it lands.</p></div></div>
+      <div class="amb"><div><h4>Memory-economy as a first principle</h4>
+        <p>Idle models unload; nothing hoards the 64 GB it isn't using. TTS + a video render + an LLM, without touching swap.</p></div></div>
+      <div class="amb"><div><h4>Reproducible from zero</h4>
+        <p><code>install.sh</code> rebuilds the whole hub on a fresh Mac; <code>doctor.sh</code> proves it's whole. No model lives outside the repo's knowledge again.</p></div></div>
+    </div>
+    <ul class="road">
+      <strong style="font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)">Roadmap</strong>
+      <li>ASR — land the mlx-whisper sidecar (<code>:8766</code>).</li>
+      <li>Video — LTX-Video + HunyuanVideo behind ComfyUI; resolve the kornia import.</li>
+      <li>Image — optional <code>mflux</code> MLX fast-Flux sidecar (<code>:8767</code>).</li>
+      <li>Reliability — bound podcast prep concurrency; retry a failed chapter instead of dropping it.</li>
+      <li>Deferred — RAG / DeepLake sidecar; a VLM webapp surface (qwen-VL already in Ollama).</li>
+    </ul>
+  </section>
+
+  <footer>
+    <div class="big">Atelier — the workshop where the household's models live.</div>
+    Internal · LAN-only · not exposed to the public internet · Mac Studio 192.168.0.159<br>
+    Generated 2026-05-25 · source of truth: <code>~/Documents/code/atelier</code>
+  </footer>
+
+</div>
+</body>
+</html>

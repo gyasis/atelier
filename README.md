@@ -8,12 +8,15 @@ LAN-only AI model server running on a Mac Studio (Apple M1 Max, 64 GB). Hosts pr
 
 | Sidecar | Port | Engine | Use case |
 |---|---|---|---|
-| `kokoro` | 8765 | kokoro-onnx (CoreML/MPS) | Fast basic TTS, fixed-voice library, ~0.6s/line |
-| `dia` | 8769 | nari-labs/Dia-1.6B-0626 (PyTorch MPS) | Expressive multi-speaker dialogue TTS with `(laughs)` / `(sighs)` cues + voice cloning |
+| `omnivoice` | 8770 | k2-fsa/OmniVoice (Diffusion LM, PyTorch MPS) | **PRIMARY TTS** — natural multi-speaker via instruct (accent/pitch/gender), ~0.6–1× RTF |
+| `kokoro` | 8765 | kokoro-onnx (CoreML/MPS) | Fallback TTS — fast, fixed-voice library, ~0.6s/line (twin on Linux `:18765`) |
+| `dia` | 8769 | nari-labs/Dia-1.6B-0626 (PyTorch MPS) | Expressive cloning TTS — **retired for live** (~10× RTF), overnight batch only |
 | `comfyui` | 8188 | ComfyUI (PyTorch MPS) | Image + video generation. Wan2.1 1.3B + 14B Q4 verified |
-| Ollama | 11434 | Apple's prebuilt | LLM serving (gemma4:31b, qwen3:32b, etc.) — managed outside Atelier but co-resident |
+| Ollama | 11434 | Apple's prebuilt | LLM serving (gemma, qwen3:32b, etc.) — managed outside Atelier but co-resident |
 
-See `docs/ARCHITECTURE.md` for the full design.
+**Start here:** [`docs/ATELIER.md`](docs/ATELIER.md) — the full overview (what it is, how it
+works, all media types, ambitions). Visual: [`docs/atelier-infographic.html`](docs/atelier-infographic.html).
+Deep design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Hardware requirements
 
