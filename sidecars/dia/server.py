@@ -82,6 +82,12 @@ _clone_audio = None       # numpy array of concatenated leo+sarah refs
 _last_request_at = time.monotonic()
 _unload_task: asyncio.Task | None = None
 _idle_unloaded_at: float | None = None  # timestamp of most recent unload (for /readyz reporting)
+# Job-aware state (memory governor): _active = generations in flight (busy when >0),
+# _waiting = callers queued on the single-flight semaphore. The idle-watcher must NEVER
+# unload while _active>0 or _waiting>0 — critical here: Dia runs ~10x RTF, so a long
+# generation must not be reaped mid-job by the idle timer.
+_active: int = 0
+_waiting: int = 0
 
 
 def _normalize_script(text: str) -> str:
@@ -172,10 +178,11 @@ async def _idle_watcher() -> None:
         await asyncio.sleep(IDLE_TICK_SECONDS)
         if _model is None:
             continue
+        # Busy-aware: never reap while a generation is running or queued.
         idle = time.monotonic() - _last_request_at
-        if idle > IDLE_UNLOAD_SECONDS:
+        if _active == 0 and _waiting == 0 and idle > IDLE_UNLOAD_SECONDS:
             async with _sem:
-                if _model is not None:  # re-check inside sem
+                if _model is not None and _active == 0:  # re-check inside sem
                     await _unload_model()
 
 
@@ -244,11 +251,17 @@ def readyz():
     # (~10s). Returning 200 in cold state so callers know the sidecar is
     # reachable; they choose whether to pay cold-load cost or pick a different
     # engine.
-    state = "warm" if _warmed and _model is not None else "cold"
+    loaded = _warmed and _model is not None
+    state = "warm" if loaded else "cold"
+    lifecycle = "cold" if not loaded else ("busy" if _active > 0 else "idle")
     idle_seconds = round(time.monotonic() - _last_request_at, 1)
     return {
         "ok": True,
         "state": state,
+        "lifecycle": lifecycle,
+        "busy": _active > 0,
+        "active_jobs": _active,
+        "queue_depth": _waiting,
         "warmed": _warmed,
         "model": MODEL_CHECKPOINT,
         "device": DEVICE,
@@ -269,11 +282,14 @@ async def admin_unload(request: Request):
     sidecars before they load (memory courtesy). Idempotent — returns 200
     whether or not a model was actually loaded."""
     _check_auth(request)
+    force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
+    if _active > 0 and not force:
+        return {"unloaded": False, "refused": "busy", "active_jobs": _active}
     was_loaded = _model is not None
     if was_loaded:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was_loaded, "model": MODEL_CHECKPOINT, "device": DEVICE}
+    return {"unloaded": was_loaded, "forced": force, "model": MODEL_CHECKPOINT, "device": DEVICE}
 
 
 class TtsReq(BaseModel):
@@ -288,7 +304,7 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
-    global _last_request_at
+    global _last_request_at, _active, _waiting
     _check_auth(request)
 
     user_text = _normalize_script(req.text)
@@ -302,7 +318,6 @@ async def tts(req: TtsReq, request: Request):
             await _load_processor_and_model_and_warm()
         if not _warmed:
             raise HTTPException(503, "cold-load failed; see server logs")
-    _last_request_at = time.monotonic()
 
     if use_clone:
         full_text = _clone_prefix_text + user_text
@@ -312,7 +327,10 @@ async def tts(req: TtsReq, request: Request):
         prompt_audio = None
 
     t0 = time.perf_counter()
+    _waiting += 1
     async with _sem:
+        _waiting -= 1
+        _active += 1
         try:
             def _prep_inputs():
                 if prompt_audio is not None:
@@ -338,6 +356,9 @@ async def tts(req: TtsReq, request: Request):
             decoded = await asyncio.to_thread(lambda: _processor.batch_decode(outputs))
         except Exception as e:
             raise HTTPException(500, f"synthesis failed: {e}")
+        finally:
+            _active -= 1
+            _last_request_at = time.monotonic()
 
     elapsed = time.perf_counter() - t0
     audio = decoded[0]

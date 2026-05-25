@@ -55,6 +55,11 @@ _voices: list[str] = []
 _last_request_at = time.monotonic()
 _unload_task: asyncio.Task | None = None
 _idle_unloaded_at: float | None = None
+# Job-aware state (memory governor): _active = inferences in flight (busy when >0),
+# _waiting = callers queued on the single-flight semaphore. The idle-watcher must
+# never unload while _active>0 or _waiting>0.
+_active: int = 0
+_waiting: int = 0
 
 
 async def _load_and_warm():
@@ -99,9 +104,10 @@ async def _idle_watcher():
         await asyncio.sleep(IDLE_TICK_SECONDS)
         if _kokoro is None:
             continue
-        if time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
+        # Busy-aware: never reap while working or with queued work.
+        if _active == 0 and _waiting == 0 and time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
             async with _sem:
-                if _kokoro is not None:
+                if _kokoro is not None and _active == 0:
                     await _unload_model()
 
 
@@ -136,10 +142,16 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    state = "warm" if _warmed and _kokoro is not None else "cold"
+    loaded = _warmed and _kokoro is not None
+    state = "warm" if loaded else "cold"
+    lifecycle = "cold" if not loaded else ("busy" if _active > 0 else "idle")
     return {
         "ok": True,
         "state": state,
+        "lifecycle": lifecycle,
+        "busy": _active > 0,
+        "active_jobs": _active,
+        "queue_depth": _waiting,
         "warmed": _warmed,
         "models_loaded": [os.path.basename(MODEL_PATH)] if _kokoro else [],
         "device": "coreml/mps",
@@ -159,13 +171,16 @@ def voices(request: Request):
 
 @app.post("/admin/unload")
 async def admin_unload(request: Request):
-    """Force-unload the model NOW (manual override)."""
+    """Unload the model. Refuses while busy unless ?force=true (governor preempt)."""
     _check_auth(request)
+    force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
+    if _active > 0 and not force:
+        return {"unloaded": False, "refused": "busy", "active_jobs": _active}
     was_loaded = _kokoro is not None
     if was_loaded:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was_loaded, "model": os.path.basename(MODEL_PATH)}
+    return {"unloaded": was_loaded, "forced": force, "model": os.path.basename(MODEL_PATH)}
 
 
 class TtsReq(BaseModel):
@@ -177,7 +192,7 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
-    global _last_request_at
+    global _last_request_at, _active, _waiting
     _check_auth(request)
     if not req.text.strip():
         raise HTTPException(400, "empty text")
@@ -188,15 +203,20 @@ async def tts(req: TtsReq, request: Request):
             await _load_and_warm()
         if not _warmed:
             raise HTTPException(503, "cold-load failed")
-    _last_request_at = time.monotonic()
     t0 = time.perf_counter()
+    _waiting += 1
     async with _sem:
+        _waiting -= 1
+        _active += 1
         try:
             samples, sample_rate = await asyncio.to_thread(
                 _kokoro.create, req.text, voice=req.voice, speed=req.speed, lang=req.lang
             )
         except Exception as e:
             raise HTTPException(500, f"synthesis failed: {e}")
+        finally:
+            _active -= 1
+            _last_request_at = time.monotonic()
     elapsed = time.perf_counter() - t0
     print(f"[tts] voice={req.voice} chars={len(req.text)} {elapsed:.2f}s")
     buf = io.BytesIO()
