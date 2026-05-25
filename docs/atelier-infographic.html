@@ -120,6 +120,24 @@
   .st span{font-size:13.5px; color:#3a372f; display:block; margin-top:5px;}
   .st em{font-style:normal; font-weight:700;}
 
+  /* ---- pressure sensing + build path ---- */
+  .sensing{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:14px;}
+  .sig{border:1px solid var(--hair); background:var(--paper-2); padding:12px 14px;}
+  .sig b{font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink); display:block;}
+  .sig span{font-size:12.5px; color:#3a372f; display:block; margin-top:4px;}
+  .sig em{font-style:normal; font-weight:700; color:var(--accent);}
+  .pline{margin-top:16px; font-family:var(--mono); font-size:13.5px; color:var(--ink);}
+  .pline .ok{color:var(--m-image); font-weight:700;} .pline .warn{color:var(--m-embed); font-weight:700;} .pline .alarm{color:var(--accent); font-weight:700;}
+  .path{display:flex; flex-wrap:wrap; margin-top:18px; border:1px solid var(--hair);}
+  .path .node{flex:1; min-width:130px; padding:13px 15px; border-right:1px solid var(--hair); background:var(--paper);}
+  .path .node:last-child{border-right:none;}
+  .path .node.now{background:#2a2620; color:#f0ebe0;}
+  .path .node .sid{font-family:var(--mono); font-size:12px; font-weight:700; color:var(--accent);}
+  .path .node.now .sid{color:#f6c89a;}
+  .path .node .lbl{font-size:13px; margin-top:5px; line-height:1.35;}
+  .path .node .tag{font-family:var(--mono); font-size:9.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); display:block; margin-top:5px;}
+  .path .node.now .tag{color:#d8a06f;}
+
   /* ---- stack chips ---- */
   .stack{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:22px;}
   .scol h4{font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase;
@@ -219,7 +237,16 @@
       <div class="st cold"><b>cold</b><span>unloaded → costs nothing</span></div>
     </div>
 
-    <div class="steps" style="margin-top:26px">
+    <p class="lede" style="font-size:16px;margin-top:30px"><b>How it knows — pressure sensing.</b> Atelier reads four live signals across both tenants:</p>
+    <div class="sensing">
+      <div class="sig"><b>Ollama logs</b><span>calls · tokens/s · KV-cache size · <em>spill</em> (offload &lt; model)</span></div>
+      <div class="sig"><b>/api/ps</b><span>loaded models · context window · keep-alive expiry</span></div>
+      <div class="sig"><b>sidecar /readyz</b><span>idle · busy · queue depth</span></div>
+      <div class="sig"><b>vm_stat</b><span>pageouts · swapouts — the cliff itself</span></div>
+    </div>
+    <div class="pline">→ <code>GET /pressure</code> → <span class="ok">ok</span> · <span class="warn">warn</span> · <span class="alarm">ALARM</span> &nbsp; broadcast to humans <em>and</em> agents</div>
+
+    <div class="steps" style="margin-top:30px">
       <div class="step"><div class="n">1 · QUEUE</div><h4>Don't kill — line up</h4>
         <p>A request for a <em>busy</em> model gets back-pressure — <em>"there's a line, position N"</em> — and waits. The default, safe path.</p></div>
       <div class="step"><div class="n">2 · FORCE</div><h4>Preempt — human-gated</h4>
@@ -230,7 +257,16 @@
         <p>Sits in front of Ollama + sidecars, knows what each is <em>doing</em>, routes by media type, reclaims from genuine idle only.</p></div>
     </div>
 
-    <blockquote style="margin-top:28px">Never evict what's working. Queue the newcomer. Reclaim only idle. Force only with a human in the loop.</blockquote>
+    <p class="lede" style="font-size:16px;margin-top:30px"><b>The path — monitor first.</b> Built safe-first; the read-only monitor ships before anything is ever evicted:</p>
+    <div class="path">
+      <div class="node"><div class="sid">a</div><div class="lbl">Sidecars report busy / idle</div><span class="tag">done · omnivoice</span></div>
+      <div class="node now"><div class="sid">b0</div><div class="lbl">Read-only monitor · /pressure · alerts</div><span class="tag">ship first · no eviction</span></div>
+      <div class="node"><div class="sid">b</div><div class="lbl">make-room — evict idle, queue busy</div><span class="tag">next</span></div>
+      <div class="node"><div class="sid">c</div><div class="lbl">force — human-gated preempt</div><span class="tag">later</span></div>
+      <div class="node"><div class="sid">d</div><div class="lbl">auto pressure-watcher</div><span class="tag">later</span></div>
+    </div>
+
+    <blockquote style="margin-top:30px">Never evict what's working. Queue the newcomer. Reclaim only idle. Force only with a human in the loop.</blockquote>
     <p style="font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--muted);margin-top:10px">
       STATUS · per-sidecar idle-unload live · job-aware governor in design</p>
   </section>
