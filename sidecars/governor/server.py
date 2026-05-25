@@ -23,6 +23,7 @@ import asyncio
 import collections
 import os
 import re
+import statistics
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -255,7 +256,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.3-sidecar-telemetry"}
+    return {"ok": True, "service": "governor", "version": "0.4-estimate"}
 
 @app.get("/readyz")
 def readyz():
@@ -271,6 +272,32 @@ def pressure():
 def telemetry():
     return {"recent_calls": list(_recent_calls), "recent_events": list(_recent_events),
             "recent_synths": list(_recent_synths), "last_spill": _last_spill}
+
+
+@app.get("/estimate")
+def estimate(engine: str, chars: int = 0):
+    """ETA for a TTS synth, learned from recorded telemetry (median seconds/char
+    over recent synths for that engine). The data comes from /telemetry's
+    recent_synths — every synth teaches the estimate.
+
+    Ollama LLM reply-time is NOT modeled here: output length is unknown ahead of
+    time, so it needs tokens/s (enable OLLAMA_DEBUG_LOG_REQUESTS=true) plus an
+    expected-output-length guess. Returned as a note, not a number."""
+    if engine == "ollama":
+        return {"engine": "ollama", "est_seconds": None,
+                "note": "LLM reply time = expected_output_tokens / tokens_per_sec. "
+                        "Enable OLLAMA_DEBUG_LOG_REQUESTS=true so the governor can learn tokens/s."}
+    samples = [s for s in _recent_synths if s["engine"] == engine and s.get("chars")]
+    if not samples:
+        return {"engine": engine, "input_chars": chars, "est_seconds": None,
+                "samples": 0, "note": "no telemetry yet for this engine — run a synth first"}
+    rates = sorted(s["seconds"] / s["chars"] for s in samples)
+    spc = statistics.median(rates)
+    return {"engine": engine, "input_chars": chars,
+            "est_seconds": round(chars * spc, 1) if chars else None,
+            "sec_per_char": round(spc, 4), "samples": len(samples),
+            "range_s_per_char": [round(rates[0], 4), round(rates[-1], 4)],
+            "note": "median over recent synths; not yet split by num_step / clone-vs-plain"}
 
 
 def _ollama_recently_active(window: float = 15.0) -> bool:
