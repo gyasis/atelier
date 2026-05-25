@@ -25,6 +25,7 @@ import os
 import re
 import sqlite3
 import statistics
+import secrets
 import subprocess
 import time
 from contextlib import asynccontextmanager
@@ -53,6 +54,12 @@ SIDECAR_LOGS = {
     "omnivoice": Path.home() / "Library/Logs/omnivoice-sidecar.out.log",
     "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
     "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
+}
+# launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
+SIDECAR_LABELS = {
+    "omnivoice": "io.macstudio.hub.omnivoice",
+    "kokoro": "io.macstudio.hub.kokoro",
+    "dia": "io.macstudio.hub.dia",
 }
 
 _state = {
@@ -423,3 +430,150 @@ async def make_room(req: MakeRoomReq):
     return {"ok": True, "dry_run": req.dry_run, "before_gb": before, "after_gb": after,
             "need_gb": req.need_gb, "reached": after >= req.need_gb if req.need_gb else None,
             "freed": freed, "notes": notes}
+
+
+# (c) Force-preempt a BUSY model — a yield NEGOTIATION, not a blunt kill.
+# Make-room (b) only evicts idle models; it refuses to interrupt a running job.
+# When a sender genuinely needs memory a busy receiver is holding, this is the
+# escalation — but it's HUMAN-GATED: a poll/handshake between sender and receiver
+# with a human authorizing in the middle. Two phases:
+#   1. unconfirmed POST  → PREVIEW: who's asking (requester/need_gb), what the
+#      receiver is doing right now (busy? active_jobs? queue_depth?), how
+#      disruptive yielding would be, + a short-lived confirm_token. Touches nothing.
+#   2. POST confirm=true + token → the human has authorized; the receiver yields.
+# No single blind call can preempt a busy model — that IS the gate.
+# Trust model: the LAN is free+open (no network auth between services). The
+# human-gate is enforced BEHAVIORALLY at the agent layer — the calling agent
+# shows the preview and asks "are you sure?" before sending confirm=true. The
+# governor doesn't authenticate the human; the two-phase token just guarantees
+# the agent saw the disruption preview before it could authorize.
+_force_tokens: dict[str, dict] = {}   # token -> {target, hard, ts}
+_FORCE_TOKEN_TTL = 60.0
+
+
+class ForceStopReq(BaseModel):
+    target: str = ""        # receiver asked to yield: "omnivoice"|"kokoro"|"dia"|"ollama:<model>"
+    requester: str = ""     # sender — who needs the memory (for the human-readable handshake)
+    need_gb: float = 0.0    # how much the sender needs (informational, shown to the human)
+    confirm: bool = False   # human authorization — must be true WITH a valid token to execute
+    token: str = ""         # echo the confirm_token returned by the preview (poll) call
+    hard: bool = False       # sidecar only: kickstart -k the process vs a soft model-unload
+
+
+async def _receiver_state(client: httpx.AsyncClient, target: str) -> dict:
+    """Poll what the receiver is doing right now — the 'receiver' half of the handshake."""
+    if target.startswith("ollama:"):
+        model = target.split(":", 1)[1]
+        try:
+            ps = (await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)).json().get("models", [])
+        except Exception:
+            ps = []
+        m = next((x for x in ps if x.get("name") == model), None)
+        return {"kind": "ollama", "model": model, "loaded": m is not None,
+                "mem_gb": round(m.get("size", 0) / 1e9, 1) if m else 0.0,
+                "busy": _ollama_recently_active(), "active_jobs": None, "queue_depth": None}
+    base = SIDECAR_BASE.get(target)
+    if not base:
+        return {"kind": "unknown", "error": f"unknown target '{target}'"}
+    try:
+        d = (await client.get(f"{base}/readyz", timeout=3)).json()
+    except Exception as e:
+        return {"kind": "sidecar", "name": target, "error": f"unreachable: {e}"}
+    return {"kind": "sidecar", "name": target, "lifecycle": d.get("lifecycle"),
+            "busy": bool(d.get("busy")), "active_jobs": d.get("active_jobs"),
+            "queue_depth": d.get("queue_depth")}
+
+
+@app.post("/force-stop")
+async def force_stop(req: ForceStopReq):
+    if not req.target:
+        return {"ok": False, "error": "target required (omnivoice|kokoro|dia|ollama:<model>)"}
+    is_ollama = req.target.startswith("ollama:")
+    if not is_ollama and req.target not in SIDECAR_BASE:
+        return {"ok": False, "error": f"unknown target '{req.target}'"}
+
+    async with httpx.AsyncClient() as client:
+        rstate = await _receiver_state(client, req.target)
+        busy = bool(rstate.get("busy"))
+        aj, qd = rstate.get("active_jobs"), rstate.get("queue_depth")
+        if busy:
+            bits = []
+            if aj:
+                bits.append(f"{aj} in-flight job{'s' if aj != 1 else ''}")
+            if qd:
+                bits.append(f"{qd} queued")
+            disruption = "WILL ABORT " + (" + ".join(bits) if bits else "a running job")
+        else:
+            disruption = "receiver is idle — yielding is safe (prefer /make-room for idle)"
+
+        # ---- Phase 1: PREVIEW (poll) — no token or unconfirmed. Touch nothing. ----
+        if not req.confirm:
+            token = secrets.token_hex(8)
+            _force_tokens[token] = {"target": req.target, "hard": req.hard, "ts": time.time()}
+            # opportunistic GC of expired tokens
+            now = time.time()
+            for t in [k for k, v in _force_tokens.items() if now - v["ts"] > _FORCE_TOKEN_TTL]:
+                _force_tokens.pop(t, None)
+            free_now = read_vm()["free_gb"]
+            return {
+                "ok": True, "phase": "preview",
+                "handshake": {
+                    "sender": req.requester or "(unspecified)",
+                    "need_gb": req.need_gb or None,
+                    "free_gb_now": free_now,
+                    "receiver": req.target,
+                },
+                "receiver_state": rstate,
+                "disruption": disruption,
+                "method": ("hard kickstart -k (process restart)" if req.hard
+                           else "soft model-unload (process stays up, reloads on next call)"),
+                "confirm_token": token, "expires_in_s": int(_FORCE_TOKEN_TTL),
+                "next": "human authorizes → re-POST same target with confirm=true and this token",
+            }
+
+        # ---- Phase 2: EXECUTE — confirm=true requires a valid, matching, fresh token ----
+        tok = _force_tokens.get(req.token)
+        if not tok:
+            return {"ok": False, "error": "missing/expired confirm_token — re-run the preview (poll) call first"}
+        if tok["target"] != req.target:
+            return {"ok": False, "error": f"token was issued for '{tok['target']}', not '{req.target}'"}
+        if time.time() - tok["ts"] > _FORCE_TOKEN_TTL:
+            _force_tokens.pop(req.token, None)
+            return {"ok": False, "error": "confirm_token expired — re-run the preview (poll) call"}
+        _force_tokens.pop(req.token, None)   # one-shot
+
+        before = read_vm()["free_gb"]
+        result: dict = {}
+        if is_ollama:
+            model = req.target.split(":", 1)[1]
+            try:
+                await client.post(f"{OLLAMA_URL}/api/generate",
+                                  json={"model": model, "keep_alive": 0}, timeout=20)
+                result = {"method": "ollama keep_alive=0",
+                          "note": "unloads after the current request returns; Ollama has no clean mid-stream abort"}
+            except Exception as e:
+                return {"ok": False, "error": f"ollama force-unload failed: {e}"}
+        elif req.hard:
+            label = SIDECAR_LABELS[req.target]
+            try:
+                subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                               check=True, capture_output=True, timeout=15)
+                result = {"method": f"launchctl kickstart -k {label}",
+                          "note": "process killed + relaunched by launchd; cold on next call"}
+            except subprocess.CalledProcessError as e:
+                return {"ok": False, "error": f"kickstart failed: {e.stderr.decode()[:200]}"}
+        else:
+            base = SIDECAR_BASE[req.target]
+            try:
+                r = (await client.post(f"{base}/admin/unload", params={"force": "true"}, timeout=15)).json()
+                result = {"method": "soft unload?force=true", "sidecar_result": r}
+            except Exception as e:
+                return {"ok": False, "error": f"soft force-unload failed: {e}"}
+
+        await asyncio.sleep(1.5)   # let macOS reclaim before re-reading
+        after = read_vm()["free_gb"]
+        return {"ok": True, "phase": "executed", "target": req.target,
+                "requester": req.requester or None, "need_gb": req.need_gb or None,
+                "before_gb": before, "after_gb": after, "freed_gb": round((after or 0) - (before or 0), 1),
+                "reached": (after >= req.need_gb) if req.need_gb else None,
+                "result": result}
