@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Atelier memory governor — READ-ONLY monitor (b0).
+"""Atelier memory governor — monitor (b0) + make-room (b).
 
-Observes the whole hub and computes one unified-memory pressure signal. It NEVER
-evicts anything — purely observability (Constitution I: observe before you act).
-make-room / force / auto-eviction build on this telemetry later.
+Observes the whole hub and computes one unified-memory pressure signal (b0), and frees
+memory on demand by evicting ONLY idle models across both tenants (b, make-room). It
+never touches a busy model — observe before you act, never evict what's working
+(Constitution I). force-preempt of a busy model (c) and the auto pressure-watcher (d)
+build on this.
 
 Sources:
   - macOS `vm_stat`            → free / resident memory + swapouts (the cliff itself)
@@ -28,6 +30,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 TOTAL_RAM_GB = float(os.environ.get("ATELIER_TOTAL_RAM_GB", "64"))
 CLIFF_GB = float(os.environ.get("ATELIER_CLIFF_GB", "55"))   # swap onset
@@ -36,11 +39,12 @@ POLL_SECONDS = int(os.environ.get("ATELIER_POLL_SECONDS", "10"))
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_LOG = Path(os.environ.get("OLLAMA_LOG", str(Path.home() / ".ollama/logs/server.log")))
 
-SIDECARS = {
-    "omnivoice": "http://127.0.0.1:8770/readyz",
-    "kokoro": "http://127.0.0.1:8765/readyz",
-    "dia": "http://127.0.0.1:8769/readyz",
+SIDECAR_BASE = {
+    "omnivoice": "http://127.0.0.1:8770",
+    "kokoro": "http://127.0.0.1:8765",
+    "dia": "http://127.0.0.1:8769",
 }
+SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 
 _state = {
     "updated_at": None, "level": "ok", "free_gb": None, "resident_gb": None,
@@ -146,8 +150,9 @@ def parse_log_line(line: str):
     global _last_spill
     m = _GIN.search(line)
     if m and m.group("path") in ("/api/chat", "/api/generate"):
-        _recent_calls.append({"at": time.strftime("%H:%M:%S"), "status": m.group("status"),
-                              "latency": m.group("lat"), "path": m.group("path")})
+        _recent_calls.append({"at": time.strftime("%H:%M:%S"), "ts": time.time(),
+                              "status": m.group("status"), "latency": m.group("lat"),
+                              "path": m.group("path")})
         return
     m = _OFFLOAD.search(line)
     if m:
@@ -204,7 +209,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.1-monitor"}
+    return {"ok": True, "service": "governor", "version": "0.2-make-room"}
 
 @app.get("/readyz")
 def readyz():
@@ -220,3 +225,68 @@ def pressure():
 def telemetry():
     return {"recent_calls": list(_recent_calls), "recent_events": list(_recent_events),
             "last_spill": _last_spill}
+
+
+def _ollama_recently_active(window: float = 15.0) -> bool:
+    """Proxy for 'Ollama busy' — any /api/chat|generate call within `window` seconds.
+    The API has no in-flight metric, so the log tail is our busy signal."""
+    now = time.time()
+    return any(now - c.get("ts", 0) < window for c in _recent_calls)
+
+
+class MakeRoomReq(BaseModel):
+    need_gb: float = 0.0   # informational target; reached=true once free_gb >= need_gb
+    dry_run: bool = False  # preview what WOULD be evicted, touch nothing
+
+
+@app.post("/make-room")
+async def make_room(req: MakeRoomReq):
+    """(b) Free memory by evicting ONLY idle models across both tenants. Never touches
+    a busy model (sidecar /admin/unload refuses busy; Ollama skipped if recently active).
+    Safe + agent-callable — idle eviction can't interrupt a running job. Preempting a
+    BUSY model is step (c), human-gated."""
+    before = read_vm()["free_gb"]
+    freed: list[dict] = []
+    notes: list[str] = []
+    async with httpx.AsyncClient() as client:
+        # 1. idle sidecars (cheap, and /admin/unload double-checks busy)
+        for name, base in SIDECAR_BASE.items():
+            try:
+                d = (await client.get(f"{base}/readyz", timeout=3)).json()
+            except Exception:
+                continue
+            if d.get("lifecycle") == "idle":
+                if req.dry_run:
+                    freed.append({"tenant": "atelier", "name": name, "would_evict": True})
+                else:
+                    try:
+                        r = (await client.post(f"{base}/admin/unload", timeout=12)).json()
+                        freed.append({"tenant": "atelier", "name": name, "result": r})
+                    except Exception as e:
+                        notes.append(f"{name} unload failed: {e}")
+        # 2. Ollama loaded models — only if not actively generating
+        if _ollama_recently_active():
+            notes.append("ollama skipped — inference call within last 15s")
+        else:
+            try:
+                ps = (await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)).json().get("models", [])
+            except Exception:
+                ps = []
+            for m in ps:
+                nm = m.get("name")
+                gb = round(m.get("size", 0) / 1e9, 1)
+                if req.dry_run:
+                    freed.append({"tenant": "ollama", "name": nm, "mem_gb": gb, "would_evict": True})
+                else:
+                    try:
+                        await client.post(f"{OLLAMA_URL}/api/generate",
+                                          json={"model": nm, "keep_alive": 0}, timeout=20)
+                        freed.append({"tenant": "ollama", "name": nm, "mem_gb": gb, "evicted": True})
+                    except Exception as e:
+                        notes.append(f"ollama stop {nm} failed: {e}")
+    if not req.dry_run:
+        await asyncio.sleep(1.5)  # let macOS reclaim before re-reading
+    after = read_vm()["free_gb"]
+    return {"ok": True, "dry_run": req.dry_run, "before_gb": before, "after_gb": after,
+            "need_gb": req.need_gb, "reached": after >= req.need_gb if req.need_gb else None,
+            "freed": freed, "notes": notes}
