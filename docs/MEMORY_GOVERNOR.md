@@ -54,6 +54,16 @@ memory.
 - Applies to: `omnivoice` (8770), `kokoro` (8765), `dia` (8769). ComfyUI (8188) exposes
   `/queue` and `/system_stats` — read those instead of adding a busy flag.
 
+### (b0) Read-only monitor — SHIP THIS FIRST (minimum-viable, zero eviction)
+A standalone watcher that only OBSERVES — no model is ever touched:
+- tails `~/.ollama/logs/server.log` (parsers above) → per-call latency, token counts
+  (if verbose enabled), load/offload/evict events, the spill signal;
+- polls Ollama `/api/ps` + each sidecar `/readyz` + `vm_stat`;
+- exposes `GET /pressure` → `{level: ok|warn|alarm, free_gb, tenants:[{name,state,mem,ctx}]}`;
+- raises WARN / ALARM (incl. the spill detector) to humans + agents.
+Safe and useful on its own — "Atelier as a monitor that watches all calls." Everything
+below consumes this telemetry. **This is the next build step after (a).**
+
 ### (b) Governor / router + `make-room`
 - A coordinator (lives where? — Mac-side script or a small FastAPI control plane) that:
   polls every model's state across both tenants; on `make-room <GB>` evicts `idle` models
@@ -128,15 +138,28 @@ then split `kv` on ` key="?val"?`. Match on msg-substring:
 | msg identifier | yields |
 |---|---|
 | `llama runner started in N seconds` | model load time |
-| `offloaded X/Y layers to GPU` | GPU offload ratio |
+| `msg=offload … layers.model=M layers.offload=N memory.available="[X GiB]" memory.required.kv="Y MiB"` | **KV-cache size + offload ratio** — `N≪M` ⇒ spilled to RAM (see spill detector) |
+| `offloaded X/Y layers to GPU` | GPU offload ratio (llama.cpp variant) |
 | `vram-based default context … default_num_ctx=N` | the context budget (KV-cache driver) |
+| `runner … gone idle, adding timer duration=5m0s` | Ollama's own idle timer started |
+| `expired event received modelPath=…` / `stopping llama server` | **Ollama evicted a model** (VRAM released) |
 | `server config … env=[…]` | live Ollama env (keep_alive, num_parallel, max_loaded) |
 
-### NOT in default logs
-Per-request **token counts + eval speed** (`prompt_eval_count`, `eval_count`, tokens/s)
-are suppressed unless `OLLAMA_DEBUG_LOG_REQUESTS=true` (or `OLLAMA_DEBUG=DEBUG`). Recover
-via: (a) flip that env, or (b) read `total_duration / eval_count / eval_duration` from the
-`/api/generate|chat` **response body** — only if Atelier proxies the call.
+### Per-request token telemetry — opt-in (the I/O time + token cost you want)
+Suppressed by default. Set `OLLAMA_DEBUG_LOG_REQUESTS=true` and the server logs one line
+per call:
+```
+msg="response metrics" total_duration=… load_duration=… prompt_eval_count=31 prompt_eval_duration=… eval_count=123 eval_duration=74772468000
+```
+`msg="response metrics".*?prompt_eval_count=(?P<in_tok>\d+).*?eval_count=(?P<out_tok>\d+).*?eval_duration=(?P<gen_ns>\d+)`
+→ tokens/s = `out_tok / (gen_ns/1e9)`; input/output token counts; total/load/eval durations.
+(Alternatively read the same fields from the `/api/chat` response body if Atelier proxies.)
+
+### Spill detector (the most useful Apple-Silicon alert)
+In `msg=offload`, `memory.available` ≈ recommended-max VRAM (~75% of unified RAM). If
+`layers.offload` ≪ `layers.model`, the model spilled to system RAM and throughput craters
+(~50 → ~5 t/s). The watcher should raise **WARN on any `offload < model`** — this is an
+earlier, more specific swap signal than `vm_stat` pageouts.
 
 ### Two config findings the governor MUST heed
 - `OLLAMA_MAX_LOADED_MODELS:0` → **unlimited** concurrent loaded models — two big LLMs can
