@@ -102,6 +102,49 @@ on their own — `qwen3-coder-next` 50 GB, `deepseek-r1:70b` 42 GB, plus many 14
 A single big LLM load is the most likely swap trigger, so big-model gating (above) is the
 governor's primary job, not an edge case.
 
+## Ollama log parsing — the per-call telemetry the API hides
+
+Logs at `~/.ollama/logs/server.log` (rotated `server-1.log`…). Two regex-friendly
+grammars, keyed by line identifier:
+
+### 1. `[GIN]` lines — every API call
+```
+[GIN] 2026/05/25 - 10:31:04 | 200 |   230.125µs | 192.168.0.146 | GET "/api/version"
+```
+`^\[GIN\]\s+(?P<ts>\S+ - \S+)\s+\|\s+(?P<status>\d+)\s+\|\s+(?P<lat>[\d.]+[µmn]?s)\s+\|\s+(?P<client>\S+)\s+\|\s+(?P<method>\w+)\s+"(?P<path>[^"]+)"`
+→ ts, status, latency, client IP, method, path. Filter `path ∈ {/api/chat,/api/generate}`
+for real inference (vs `/api/ps` polls). Gives call rate, busy/idle, per-call latency,
+which client (gateway = `.146`).
+
+### 2. `time= level= source= msg=` lines — lifecycle + memory
+```
+time=…T11:00:54+02:00 level=INFO source=server.go:1432 msg="llama runner started in 12.95 seconds"
+time=…T13:22:46+02:00 level=INFO source=routes.go:1914 msg="vram-based default context" total_vram="48.0 GiB" default_num_ctx=262144
+                                                        msg="offloaded 61/61 layers to GPU"
+```
+`^time=(?P<ts>\S+)\s+level=(?P<lvl>\w+)\s+source=(?P<src>\S+)\s+msg="(?P<msg>[^"]*)"(?P<kv>.*)$`
+then split `kv` on ` key="?val"?`. Match on msg-substring:
+
+| msg identifier | yields |
+|---|---|
+| `llama runner started in N seconds` | model load time |
+| `offloaded X/Y layers to GPU` | GPU offload ratio |
+| `vram-based default context … default_num_ctx=N` | the context budget (KV-cache driver) |
+| `server config … env=[…]` | live Ollama env (keep_alive, num_parallel, max_loaded) |
+
+### NOT in default logs
+Per-request **token counts + eval speed** (`prompt_eval_count`, `eval_count`, tokens/s)
+are suppressed unless `OLLAMA_DEBUG_LOG_REQUESTS=true` (or `OLLAMA_DEBUG=DEBUG`). Recover
+via: (a) flip that env, or (b) read `total_duration / eval_count / eval_duration` from the
+`/api/generate|chat` **response body** — only if Atelier proxies the call.
+
+### Two config findings the governor MUST heed
+- `OLLAMA_MAX_LOADED_MODELS:0` → **unlimited** concurrent loaded models — two big LLMs can
+  co-load and blow the 64 GB budget instantly. Governor should cap effective concurrency.
+- `default_num_ctx=262144` (**256K**) on `total_vram=48 GiB` → Ollama defaults to a giant
+  context, making the KV cache a major, context-driven consumer. This is the "context
+  pressure" to watch (and possibly cap via `OLLAMA_CONTEXT_LENGTH`).
+
 ## Acceptance criteria
 
 - A 10-min ComfyUI/Dia render is NEVER unloaded mid-job by the idle timer or the watcher.
