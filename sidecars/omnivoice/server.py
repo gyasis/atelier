@@ -56,6 +56,11 @@ _sem = asyncio.Semaphore(1)
 _last_request_at = time.monotonic()
 _unload_task: asyncio.Task | None = None
 _idle_unloaded_at: float | None = None
+# Job-aware state (memory governor): _active = inferences in flight (busy when >0),
+# _waiting = callers blocked on the semaphore (queue depth). The idle-watcher must
+# never unload while _active>0 or _waiting>0, regardless of the idle timer.
+_active: int = 0
+_waiting: int = 0
 
 
 async def _load_and_warm():
@@ -101,9 +106,11 @@ async def _idle_watcher():
         await asyncio.sleep(IDLE_TICK_SECONDS)
         if _model is None:
             continue
-        if time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
+        # Busy-aware: never reap a model that's working or has queued work,
+        # no matter how long the idle timer has run (protects long renders).
+        if _active == 0 and _waiting == 0 and time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
             async with _sem:
-                if _model is not None:
+                if _model is not None and _active == 0:
                     await _unload_model()
 
 
@@ -138,10 +145,16 @@ def healthz():
 
 @app.get("/readyz")
 def readyz():
-    state = "warm" if _warmed and _model is not None else "cold"
+    loaded = _warmed and _model is not None
+    state = "warm" if loaded else "cold"
+    lifecycle = "cold" if not loaded else ("busy" if _active > 0 else "idle")
     return {
         "ok": True,
         "state": state,
+        "lifecycle": lifecycle,
+        "busy": _active > 0,
+        "active_jobs": _active,
+        "queue_depth": _waiting,
         "warmed": _warmed,
         "model": MODEL_ID if _model else None,
         "device": DEVICE,
@@ -155,13 +168,18 @@ def readyz():
 
 @app.post("/admin/unload")
 async def admin_unload(request: Request):
-    """Force-unload the model NOW (manual override)."""
+    """Unload the model. Refuses while busy unless ?force=true (the governor's
+    human-gated preempt). force still waits for the in-flight op to release the
+    semaphore — it can't kill a thread mid-generate, only unload right after."""
     _check_auth(request)
+    force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
+    if _active > 0 and not force:
+        return {"unloaded": False, "refused": "busy", "active_jobs": _active}
     was_loaded = _model is not None
     if was_loaded:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was_loaded, "model": MODEL_ID, "device": DEVICE}
+    return {"unloaded": was_loaded, "forced": force, "model": MODEL_ID, "device": DEVICE}
 
 
 class TtsReq(BaseModel):
@@ -185,7 +203,7 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
-    global _last_request_at
+    global _last_request_at, _active, _waiting
     _check_auth(request)
     if not req.text.strip():
         raise HTTPException(400, "empty text")
@@ -195,9 +213,11 @@ async def tts(req: TtsReq, request: Request):
             await _load_and_warm()
         if not _warmed:
             raise HTTPException(503, "cold-load failed")
-    _last_request_at = time.monotonic()
     t0 = time.perf_counter()
+    _waiting += 1                      # queued (blocked on the single-flight sem)
     async with _sem:
+        _waiting -= 1
+        _active += 1                   # now busy — watcher won't reap us
         try:
             gen_cfg = OmniVoiceGenerationConfig(
                 num_step=req.num_step,
@@ -214,6 +234,9 @@ async def tts(req: TtsReq, request: Request):
             audio_list = await asyncio.to_thread(_model.generate, **gen_kwargs)
         except Exception as e:
             raise HTTPException(500, f"synthesis failed: {e}")
+        finally:
+            _active -= 1                # no longer busy
+            _last_request_at = time.monotonic()   # idle clock starts at job END
     elapsed = time.perf_counter() - t0
     # OmniVoice.generate() returns list[np.ndarray] — take the first (batch=1)
     samples = audio_list[0] if isinstance(audio_list, list) else audio_list
