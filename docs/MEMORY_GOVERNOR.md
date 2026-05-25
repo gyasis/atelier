@@ -66,9 +66,41 @@ memory.
 - `force` flag on `make-room` / a request → preempt a busy job + evict. Requires an
   explicit human-approval gate (not a silent default).
 
-### (d) Silent pressure-watcher
-- Background poll of `memory_pressure` / `vm_stat`; when free memory approaches the cliff,
-  evict the lowest-priority `idle` model before macOS swaps. Never touches `busy`.
+### (d) Alerting pressure-watcher (NOT silent — it announces)
+- Background poll of `memory_pressure` / `vm_stat` + Ollama `GET /api/ps` + sidecar `/readyz`.
+- **Two thresholds, both broadcast to humans AND agents:**
+  - `WARN` (~45 GB resident / cliff approaching) and `ALARM` (~55 GB / first swapout).
+  - humans: desktop notification + webapp banner (+ optional sound).
+  - agents: `GET /pressure` → `{level: ok|warn|alarm, free_gb, tenants:[...]}` they poll
+    BEFORE dispatching heavy work; optionally an SSE stream.
+- On `ALARM`, evict the lowest-priority `idle` model before macOS swaps. Never touches `busy`.
+- **Context-aware:** Ollama's footprint grows with context length (KV cache). Poll `/api/ps`
+  to catch the climb — don't trust a static size.
+- **Big-model gating:** loading `qwen3-coder-next` (50 GB) or `deepseek-r1:70b` (42 GB) alone
+  nears/exceeds the 55 GB cliff. The governor must `make-room` for the target's footprint
+  BEFORE the load is issued, or refuse/queue it.
+
+## Ollama observability — what Atelier can hook into
+
+Ollama 0.24.0 (LAN `:11434`). What the governor can and can't see:
+
+| Signal | Source | Available |
+|---|---|---|
+| Loaded models + memory (`size`/`size_vram`) + `context` + `expires_at` | `GET /api/ps` | ✅ rich, poll it |
+| Context-driven footprint growth | `/api/ps` size reflects current alloc — poll to watch climb | ✅ |
+| Model catalog + sizes | `GET /api/tags` | ✅ |
+| Whole-machine pressure / swap onset | `memory_pressure`, `vm_stat` (Pageouts/Swapouts) | ✅ |
+| Evict a model | `ollama stop <m>` / request `keep_alive:0` | ✅ |
+| **In-flight request count / live tokens** | none — `/metrics` is 404 on 0.24.0 | ⚠️ **no API** |
+
+**In-flight calls workaround:** tail `~/.ollama/logs/server.log` for request start/end
+lines, and treat a freshly-bumped `expires_at` in `/api/ps` as "recently active." Good
+enough to mark Ollama `busy` vs `idle`; not exact token-level telemetry.
+
+**Catalog reality (drives the design):** several installed models exceed/near the cliff
+on their own — `qwen3-coder-next` 50 GB, `deepseek-r1:70b` 42 GB, plus many 14–21 GB.
+A single big LLM load is the most likely swap trigger, so big-model gating (above) is the
+governor's primary job, not an edge case.
 
 ## Acceptance criteria
 
