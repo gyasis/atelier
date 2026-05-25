@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/governor-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.governor</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/governor-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8799</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/governor-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/governor-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/governor-sidecar</string>
+</dict>
+</plist>

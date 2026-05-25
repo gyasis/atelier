@@ -28,6 +28,7 @@ port_for() {
     kokoro)    echo 8765 ;;
     dia)       echo 8769 ;;
     omnivoice) echo 8770 ;;
+    governor)  echo 8799 ;;
     comfyui)   echo 8188 ;;
     *)         echo "" ;;
   esac

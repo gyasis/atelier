@@ -28,12 +28,13 @@ mkdir -p "$SERVICES_DIR" "$LAUNCHAGENTS_DIR" "$LOGS_DIR"
 mkdir -p "$MODELS_DIR"/{kokoro,voice-refs,hf-cache,unet,clip,vae,loras,video,whisper,checkpoints}
 
 # ---------- 3. Sidecar venvs ----------
-for SC in kokoro dia omnivoice; do
+for SC in kokoro dia omnivoice governor; do
   SC_DIR="$SERVICES_DIR/${SC}-sidecar"
   case "$SC" in
     kokoro)    SC_DIR="$SERVICES_DIR/kokoro-sidecar" ;;
     dia)       SC_DIR="$SERVICES_DIR/voice-clone-sidecar" ;;
     omnivoice) SC_DIR="$SERVICES_DIR/omnivoice-sidecar" ;;
+    governor)  SC_DIR="$SERVICES_DIR/governor-sidecar" ;;
   esac
   say "setting up sidecar: $SC -> $SC_DIR"
   mkdir -p "$SC_DIR"
@@ -100,7 +101,7 @@ done
 # ---------- 7. Verify ----------
 say "verifying services (give them ~30s to warm)…"
 sleep 30
-for PORT in 8765 8769 8770; do
+for PORT in 8765 8769 8770 8799; do
   if curl -sf --max-time 3 "http://localhost:$PORT/healthz" >/dev/null; then
     echo -e "  \033[1;32m✓\033[0m http://localhost:$PORT/healthz"
   else
