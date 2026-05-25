@@ -45,8 +45,10 @@ for SC in kokoro dia omnivoice governor; do
   source "$SC_DIR/.venv/bin/activate"
   /opt/homebrew/bin/uv pip install -q -r "$REPO_DIR/sidecars/$SC/requirements.txt"
   deactivate
-  # Symlink server.py from repo
-  ln -sfn "$REPO_DIR/sidecars/$SC/server.py" "$SC_DIR/server.py"
+  # Symlink all .py modules from the repo (server.py + helpers e.g. predictor.py)
+  for PY in "$REPO_DIR/sidecars/$SC"/*.py; do
+    [ -e "$PY" ] && ln -sfn "$PY" "$SC_DIR/$(basename "$PY")"
+  done
 done
 
 # ---------- 4. launchd plists ----------
