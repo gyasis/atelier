@@ -18,6 +18,38 @@ LAN-only AI model server running on a Mac Studio (Apple M1 Max, 64 GB). Hosts pr
 works, all media types, ambitions). Visual: [`docs/atelier-infographic.html`](docs/atelier-infographic.html).
 Deep design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Topology — two boxes
+
+Atelier is the **compute** half of a two-machine setup. It runs on the Mac; the
+things that *consume* it run on a separate **Linux box**, over the LAN.
+
+```
+      Linux box (the Blade)                         Mac Studio · 192.168.0.159
+      consumers / orchestration / UI                  "Atelier" · the compute
+ ┌──────────────────────────────────┐         ┌──────────────────────────────────┐
+ │ githubawesome webapp      :5757   │         │ omnivoice  (TTS, primary)  :8770  │
+ │   SvelteKit · Radio Mode          │ ──HTTP─▶│ kokoro     (TTS, fallback) :8765  │
+ │ Claude Code agent + skills        │   LAN   │ dia        (clone, batch)  :8769  │
+ │ graphiti-mcp · FalkorDB   :6380   │         │ comfyui    (image/video)   :8188  │
+ │ kokoro twin (offline TTS) :18765  │ ◀─JSON──│ governor   (mem + ETA)     :8799  │
+ │ predictor /report caller          │         │ Ollama     (local LLMs)   :11434  │
+ └──────────────────────────────────┘         └──────────────────────────────────┘
+```
+
+|  | **Mac Studio** (`192.168.0.159`) | **Linux box** (the Blade) |
+|---|---|---|
+| **Role** | The compute — *Atelier* itself | The consumers / orchestration / UI |
+| **Runs** | omnivoice · kokoro · dia · comfyui · governor sidecars + Ollama — all under launchd | githubawesome webapp, Claude agent + skills, graphiti-mcp (FalkorDB), a local Kokoro twin |
+| **Owns** | The models, the unified-memory/MPS GPU, the memory **governor**, the voice refs (`~/models/voice-refs/`), the predictor store | The product UX (Radio Mode), the corpus DB (SQLite), agent memory, the desktop launcher |
+| **Speaks** | HTTP sidecar endpoints (`/tts`, `/healthz`, `/readyz`, `/admin/unload`, …) | Calls those endpoints over the LAN; POSTs real run stats back to the governor's predictor |
+
+**Why split this way:** the Mac has the 64 GB unified memory + MPS to host the
+models; the Linux box drives the experience and keeps heavy ML compute off the
+workstation. The boxes reboot independently. The Linux **Kokoro twin** (`:18765`)
+exists as a Mac-offline TTS fallback — note the podcast itself is deliberately
+**OmniVoice-only** (a Kokoro fallback would swap the cloned host voices mid-show),
+so a Mac outage stops the podcast rather than degrading its voices.
+
 ## Hardware requirements
 
 - Apple Silicon Mac (M1/M2/M3 with Max or Ultra variant strongly recommended)
