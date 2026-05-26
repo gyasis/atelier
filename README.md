@@ -45,10 +45,15 @@ things that *consume* it run on a separate **Linux box**, over the LAN.
 
 **Why split this way:** the Mac has the 64 GB unified memory + MPS to host the
 models; the Linux box drives the experience and keeps heavy ML compute off the
-workstation. The boxes reboot independently. The Linux **Kokoro twin** (`:18765`)
-exists as a Mac-offline TTS fallback — note the podcast itself is deliberately
-**OmniVoice-only** (a Kokoro fallback would swap the cloned host voices mid-show),
-so a Mac outage stops the podcast rather than degrading its voices.
+workstation. The boxes reboot independently.
+
+**Podcast voice resilience (run-locked engine):** the voice engine is chosen
+**once at run start and locked for the whole show** — it never switches
+mid-episode (a mid-show swap was the "two-Leos" jump bug). OmniVoice up → the
+cloned hosts for every turn. OmniVoice/Mac down → the entire show falls to
+Kokoro (Mac twin `:8765`, then the **Linux twin `:18765`** if the Mac is fully
+offline) with a spoken stand-in disclaimer up front. So an outage degrades to a
+consistent backup voice + a heads-up — never a voice that changes mid-show.
 
 ## Hardware requirements
 
