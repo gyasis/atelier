@@ -1,0 +1,56 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - generic [ref=e9]: Open Design
+        - generic [ref=e10]: Research Preview
+      - generic [ref=e11]: by Nexu Labs
+    - generic [ref=e12]:
+      - tablist [ref=e13]:
+        - tab "Prototype" [selected] [ref=e14] [cursor=pointer]
+        - tab "Slide deck" [ref=e15] [cursor=pointer]
+        - tab "From template" [ref=e16] [cursor=pointer]
+        - tab "Other" [ref=e17] [cursor=pointer]
+      - generic [ref=e18]:
+        - heading "New prototype" [level=3] [ref=e19]
+        - textbox "Project name" [ref=e20]
+        - generic [ref=e22]: Design system
+        - generic [ref=e24]:
+          - generic [ref=e25]: Fidelity
+          - generic [ref=e26]:
+            - button "Wireframe" [ref=e27] [cursor=pointer]:
+              - img [ref=e29]
+              - generic [ref=e39]: Wireframe
+            - button "High fidelity" [pressed] [ref=e40] [cursor=pointer]:
+              - img [ref=e42]
+              - generic [ref=e52]: High fidelity
+        - button "Create" [disabled] [ref=e53]:
+          - img [ref=e54]
+          - generic [ref=e55]: Create
+        - button "Import Claude Design ZIP" [disabled] [ref=e56]:
+          - img [ref=e57]
+          - generic [ref=e60]: Import Claude Design ZIP
+      - generic [ref=e61]: Only you can see your project by default.
+    - generic [ref=e62]:
+      - button "Local CLI · no agent selected" [ref=e63] [cursor=pointer]:
+        - img [ref=e64]
+        - generic [ref=e67]: Local CLI
+        - generic [ref=e68]: ·
+        - generic [ref=e69]: no agent selected
+      - button "English" [ref=e71] [cursor=pointer]:
+        - img [ref=e72]
+        - generic [ref=e77]: English
+        - img [ref=e78]
+    - button "Resize sidebar" [ref=e80]
+  - main [ref=e81]:
+    - generic [ref=e82]:
+      - tablist [ref=e83]:
+        - tab "Designs" [selected] [ref=e84] [cursor=pointer]
+        - tab "Examples" [ref=e85] [cursor=pointer]
+        - tab "Design systems" [ref=e86] [cursor=pointer]
+      - button "Open settings" [ref=e88] [cursor=pointer]:
+        - img
+    - generic [ref=e90]:
+      - status [ref=e91]:
+        - img [ref=e92]
+      - generic [ref=e94]: Loading workspace…

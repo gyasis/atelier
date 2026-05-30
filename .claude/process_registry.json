@@ -1,0 +1,74 @@
+{
+  "tasks": {
+    "T009": {
+      "mode": "native",
+      "command": "**T009** [P] Create `dashboard/src-tauri/src/commands.rs` — Tauri `#[tauri::command]` handlers:",
+      "status": "running",
+      "started_at": "2026-05-30T21:20:09.456099Z",
+      "constitution_rules": []
+    },
+    "T010": {
+      "mode": "native",
+      "command": "**T010** Wire commands in `dashboard/src-tauri/src/lib.rs` — register `get_pressure`, `get_telemetry`, `get_predictor_stats`, `get_sidecars` in `tauri::Builder`. Import `commands` and `fetcher` modules. Add `models` module.",
+      "status": "running",
+      "started_at": "2026-05-30T21:20:09.460876Z",
+      "constitution_rules": []
+    },
+    "T001": {
+      "mode": "native",
+      "command": "**T001** Install Rust toolchain if absent: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source \"$HOME/.cargo/env\"`. Verify `cargo --version`. Install Tauri CLI v2: `cargo install tauri-cli --version \"^2\"`. Verify `cargo tauri --version`.",
+      "status": "running",
+      "started_at": "2026-05-30T21:15:41.766199Z",
+      "constitution_rules": []
+    },
+    "T004": {
+      "mode": "native",
+      "command": "**T004** [P] Add `dashboard/ui/hud.html` — copy `mini-hud-card-2.html` as the mini HUD card page. Same CDN-to-local replacement as T003.",
+      "status": "running",
+      "started_at": "2026-05-30T21:15:41.781702Z",
+      "constitution_rules": []
+    },
+    "T007": {
+      "mode": "native",
+      "command": "**T007** Create `dashboard/src-tauri/src/models.rs` — `serde` `Deserialize` structs mirroring the governor JSON:",
+      "status": "running",
+      "started_at": "2026-05-30T21:20:09.446407Z",
+      "constitution_rules": []
+    },
+    "T008": {
+      "mode": "native",
+      "command": "**T008** [P] Create `dashboard/src-tauri/src/fetcher.rs` — async functions using `reqwest::Client`:",
+      "status": "running",
+      "started_at": "2026-05-30T21:20:09.451090Z",
+      "constitution_rules": []
+    },
+    "T006": {
+      "mode": "native",
+      "command": "**T006** Add dependencies to `dashboard/src-tauri/Cargo.toml`: `reqwest = { version = \"0.12\", features = [\"json\"] }`, `serde = { version = \"1\", features = [\"derive\"] }`, `serde_json = \"1\"`, `tokio = { version = \"1\", features = [\"full\"] }`, `tauri = { version = \"2\", features = [\"tray-icon\"] }`.",
+      "status": "running",
+      "started_at": "2026-05-30T21:20:09.440956Z",
+      "constitution_rules": []
+    },
+    "T003": {
+      "mode": "native",
+      "command": "**T003** [P] Create `dashboard/ui/` — the HTML frontend that the webview loads. Copy `atelier-hub-dashboard.html` from the design prototype as `dashboard/ui/index.html`. Strip the `<script src=\"https://cdn.jsdelivr.net/npm/chart.js...\">` CDN tag and replace with a local `dashboard/ui/vendor/chart.umd.min.js` (download it). This makes the app fully offline.",
+      "status": "running",
+      "started_at": "2026-05-30T21:15:41.776347Z",
+      "constitution_rules": []
+    },
+    "T002": {
+      "mode": "native",
+      "command": "**T002** Scaffold the Tauri project at `dashboard/`: from repo root run `cargo tauri init` with app name `AtelierDashboard`, window title `Atelier`, `distDir` pointing to `../ui/dist`, `devUrl` pointing to `http://localhost:1420`. Accept all other defaults. This creates `dashboard/src-tauri/` with `Cargo.toml`, `tauri.conf.json`, `src/main.rs`, `src/lib.rs`, `capabilities/`.",
+      "status": "running",
+      "started_at": "2026-05-30T21:15:41.771292Z",
+      "constitution_rules": []
+    },
+    "T005": {
+      "mode": "native",
+      "command": "**T005** [P] Create `dashboard/ui/js/atelier-bridge.js` — the JS side of the Tauri bridge. Exports `async function fetchPressure()`, `fetchTelemetry()`, `fetchPredictorStats()`, `fetchSidecars()` — each calls `window.__TAURI__.invoke('get_pressure')` etc. and returns the parsed JSON. Falls back to mock data if `window.__TAURI__` is undefined (for browser preview).",
+      "status": "running",
+      "started_at": "2026-05-30T21:15:41.786674Z",
+      "constitution_rules": []
+    }
+  }
+}

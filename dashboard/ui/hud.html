@@ -1,0 +1,379 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Atelier Hub — Mini HUD</title>
+<script src="../vendor/chart.umd.min.js"></script>
+<style>
+  :root {
+    --gold: #C8A96E;
+    --gold-dim: rgba(200,169,110,0.16);
+    --text: #EDEAE3;
+    --text-2: #9A958A;
+    --text-3: #63605A;
+    --up: #5FA86B;
+    --busy: #C8A96E;
+    --cold: #55524C;
+    --warn: #C99A52;
+    --cliff: #C2554B;
+    --mono: "SF Mono", ui-monospace, "Berkeley Mono", Menlo, monospace;
+    --sans: Inter, -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    /* dark preview backdrop — the card is the deliverable, this is just stage */
+    background:
+      radial-gradient(1200px 600px at 70% -10%, #1a1a18 0%, #0b0b0a 55%, #060605 100%);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  /* ============ THE FLOATING CARD ============ */
+  .hud-card {
+    /* For a real overlay, swap to: position: fixed; bottom: 20px; right: 20px; */
+    position: relative;
+    width: 420px;
+    height: 320px;
+    background: rgba(14,14,14,0.92);
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+    border: 1px solid var(--gold-dim);
+    box-shadow:
+      0 18px 50px -12px rgba(0,0,0,0.7),
+      0 0 0 1px rgba(200,169,110,0.10),
+      inset 0 1px 0 rgba(255,255,255,0.03);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    padding: 13px 14px 11px;
+    gap: 9px;
+    overflow: hidden;
+    border-radius: 2px;
+  }
+  /* subtle top gold seam */
+  .hud-card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(200,169,110,0.55), transparent);
+  }
+
+  /* ---- TOP STATUS BAR ---- */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: none;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .mem-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px 3px 7px;
+    border: 1px solid var(--gold-dim);
+    border-radius: 999px;
+    color: var(--text);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .mem-pill .pdot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .mem-pill .pv { color: var(--gold); }
+  .mem-pill .cliff { color: var(--text-3); }
+  .sep { width: 1px; height: 11px; background: rgba(255,255,255,0.10); flex: none; }
+  .stat { white-space: nowrap; }
+  .stat b { color: var(--text); font-weight: 500; }
+  .stat .lbl {
+    font-family: var(--sans);
+    font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--text-3); margin-left: 4px;
+  }
+
+  /* ---- MIDDLE : Scene Info ---- */
+  .scene {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    gap: 16px;
+    align-items: center;
+  }
+  .pie-box { position: relative; width: 90px; height: 90px; justify-self: center; }
+  .pie-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .pie-center .pn { font-family: var(--mono); font-size: 16px; color: var(--gold); line-height: 1; letter-spacing: -0.02em; }
+  .pie-center .pl { font-size: 7.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3); margin-top: 2px; }
+
+  .sidecars { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .sc-cap {
+    font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--text-3); margin-bottom: 1px;
+  }
+  .sc-row {
+    display: grid;
+    grid-template-columns: 9px 1fr auto auto;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .sc-row .name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-row .mem { color: var(--text-2); font-size: 10px; }
+  .sc-row .jobs {
+    color: var(--gold);
+    font-size: 10px;
+    min-width: 30px; text-align: right;
+  }
+  .sc-row .jobs .jl { color: var(--text-3); font-size: 8.5px; }
+
+  .sdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .sdot.up { background: var(--up); box-shadow: 0 0 6px rgba(95,168,107,0.6); }
+  .sdot.busy { background: var(--busy); box-shadow: 0 0 6px rgba(200,169,110,0.7); animation: glow 1.6s ease-in-out infinite; }
+  .sdot.cold { background: var(--cold); }
+  @keyframes glow {
+    0%,100% { box-shadow: 0 0 4px rgba(200,169,110,0.4); }
+    50% { box-shadow: 0 0 9px rgba(200,169,110,0.9); }
+  }
+
+  /* ---- FEED : last active invocations (messenger style) ---- */
+  .feed {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding-top: 9px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+  }
+  .feed-cap {
+    font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--text-3); margin-bottom: 1px;
+  }
+  .fd-row {
+    display: grid;
+    grid-template-columns: 7px 1fr auto;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .fd-row .msg {
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .fd-row .el { color: var(--text-3); font-size: 9.5px; text-align: right; }
+  .mdot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .mdot.tts   { background: #C8A96E; }
+  .mdot.llm   { background: #6E86C8; }
+  .mdot.img   { background: #9B7EC8; }
+  .mdot.embed { background: #63605A; }
+
+  /* ---- BOTTOM : inline tok/sec sparkline ---- */
+  .spark {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .spark-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  .spark-head .l {
+    font-size: 8px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3);
+  }
+  .spark-head .v {
+    font-family: var(--mono); font-size: 11px; color: var(--gold);
+  }
+  .spark-head .v .u { color: var(--text-3); font-size: 8.5px; }
+  .spark-wrap { position: relative; height: 40px; }
+
+  /* ---- LIVE indicator (bottom-right) ---- */
+  .live {
+    position: absolute;
+    bottom: 9px; right: 12px;
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--text-3);
+  }
+  .live .ldot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--up);
+    box-shadow: 0 0 0 0 rgba(95,168,107,0.6);
+    animation: pulse 1.8s ease-out infinite;
+  }
+  .live .ltxt { color: var(--up); letter-spacing: 0.1em; font-weight: 600; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(95,168,107,0.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(95,168,107,0); }
+    100% { box-shadow: 0 0 0 0 rgba(95,168,107,0); }
+  }
+
+  ::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+
+<div class="hud-card" data-od-id="mini-hud">
+
+  <!-- TOP STATUS BAR -->
+  <div class="statusbar" data-od-id="status-bar">
+    <span class="mem-pill" id="memPill">
+      <span class="pdot"></span>
+      <span><span class="pv">38.4</span> / <span class="cliff">55GB</span></span>
+    </span>
+    <span class="sep"></span>
+    <span class="stat"><b>5</b><span class="lbl">tenants</span></span>
+    <span class="sep"></span>
+    <span class="stat"><b>4</b><span class="lbl">active jobs</span></span>
+  </div>
+
+  <!-- MIDDLE : SCENE INFO -->
+  <div class="scene" data-od-id="scene-info">
+    <div class="pie-box">
+      <canvas id="pieChart"></canvas>
+      <div class="pie-center"><span class="pn">54</span><span class="pl">GB loaded</span></div>
+    </div>
+
+    <div class="sidecars">
+      <div class="sc-cap">Busiest sidecars</div>
+      <div class="sc-row">
+        <span class="sdot busy"></span>
+        <span class="name">omnivoice</span>
+        <span class="mem">18.0 GB</span>
+        <span class="jobs">3<span class="jl"> jobs</span></span>
+      </div>
+      <div class="sc-row">
+        <span class="sdot busy"></span>
+        <span class="name">comfyui</span>
+        <span class="mem">12.0 GB</span>
+        <span class="jobs">1<span class="jl"> job</span></span>
+      </div>
+      <div class="sc-row">
+        <span class="sdot up"></span>
+        <span class="name">qwen3:32b</span>
+        <span class="mem">20.0 GB</span>
+        <span class="jobs">0<span class="jl"> job</span></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- FEED : last 3 active invocations -->
+  <div class="feed" data-od-id="invocation-feed">
+    <div class="feed-cap">Active invocations</div>
+    <div class="fd-row">
+      <span class="mdot tts"></span>
+      <span class="msg">narrate ch.3 — "the lighthouse keeper waved at the…"</span>
+      <span class="el">1.8s</span>
+    </div>
+    <div class="fd-row">
+      <span class="mdot llm"></span>
+      <span class="msg">summarize Q3 earnings call transcript, flag risks…</span>
+      <span class="el">4.2s</span>
+    </div>
+    <div class="fd-row">
+      <span class="mdot img"></span>
+      <span class="msg">cyberpunk alley, neon rain, volumetric fog, 4k</span>
+      <span class="el">12s</span>
+    </div>
+  </div>
+
+  <!-- BOTTOM : tokens/sec sparkline -->
+  <div class="spark" data-od-id="tps-spark">
+    <div class="spark-head">
+      <span class="l">Tokens / sec · last 10 req</span>
+      <span class="v" id="tpsNow">47<span class="u"> t/s</span></span>
+    </div>
+    <div class="spark-wrap"><canvas id="tpsChart"></canvas></div>
+  </div>
+
+  <!-- LIVE -->
+  <div class="live" data-od-id="live">
+    <span class="ldot"></span>
+    <span class="ltxt">LIVE</span>
+    <span id="updated">updated 2s ago</span>
+  </div>
+
+</div>
+
+<script>
+const GOLD = "#C8A96E", TEXT3 = "#63605A", GRID = "rgba(255,255,255,0.05)";
+const mono = '"SF Mono", ui-monospace, Menlo, monospace';
+Chart.defaults.font.family = mono;
+Chart.defaults.font.size = 8;
+Chart.defaults.color = TEXT3;
+Chart.defaults.animation = { duration: 500 };
+
+// seeded mock RNG for stable values
+let seed = 42;
+function rnd(){ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+// ---- memory pill colored by pressure (38.4 of 55 cliff) ----
+const resident = 38.4, cliff = 55;
+const pressure = resident / cliff;
+const pillColor = pressure < 0.6 ? '#5FA86B' : pressure < 0.85 ? '#C99A52' : '#C2554B';
+const pill = document.getElementById('memPill');
+pill.querySelector('.pdot').style.background = pillColor;
+pill.querySelector('.pdot').style.boxShadow = '0 0 6px ' + pillColor + '99';
+pill.querySelector('.pv').style.color = pillColor;
+pill.style.borderColor = pillColor + '44';
+
+// ---- doughnut : loaded GB (same gold palette as full dashboard) ----
+const pieSlices = [
+  { l:'omnivoice', gb:18, c:'#C8A96E' },
+  { l:'kokoro',    gb:4,  c:'#8C7A55' },
+  { l:'comfyui',   gb:12, c:'#A98B5C' },
+  { l:'qwen3',     gb:20, c:'#D9C091' },
+  { l:'free',      gb:1,  c:'#2A2A28' },
+];
+new Chart(document.getElementById('pieChart'), {
+  type:'doughnut',
+  data:{ labels: pieSlices.map(s=>s.l),
+    datasets:[{ data: pieSlices.map(s=>s.gb), backgroundColor: pieSlices.map(s=>s.c),
+      borderColor:'#0E0E0E', borderWidth:2 }] },
+  options:{ maintainAspectRatio:false, responsive:true, cutout:'66%',
+    plugins:{ legend:{display:false},
+      tooltip:{ callbacks:{ label:c=>c.label+' '+c.parsed+'GB' } } } }
+});
+
+// ---- tokens/sec sparkline (last 10 req) ----
+const reqN = 10, tps = [];
+let p = 44;
+for (let i=0;i<reqN;i++){ p += (rnd()-0.5)*11; p = Math.max(28, Math.min(66, p)); tps.push(Math.round(p)); }
+tps[reqN-1] = 47;
+new Chart(document.getElementById('tpsChart'), {
+  type:'line',
+  data:{ labels: tps.map((_,i)=>i+1), datasets:[
+    { data: tps, borderColor: GOLD, borderWidth:1.4, pointRadius:0, tension:0.35,
+      fill:true, backgroundColor:(c)=>{ const ctx=c.chart.ctx; const g=ctx.createLinearGradient(0,0,0,44);
+        g.addColorStop(0,'rgba(200,169,110,0.28)'); g.addColorStop(1,'rgba(200,169,110,0.0)'); return g; } },
+    { data:new Array(reqN).fill(30), borderColor:'#C99A52', borderWidth:1,
+      borderDash:[3,3], pointRadius:0, fill:false } ]},
+  options:{ maintainAspectRatio:false, responsive:true,
+    plugins:{ legend:{display:false},
+      tooltip:{ callbacks:{ title:()=>'', label:c=>c.datasetIndex===0?c.parsed.y+' t/s':null } } },
+    scales:{ x:{ display:false, grid:{display:false} },
+      y:{ display:false, min:18, max:72, grid:{display:false} } } }
+});
+
+// ---- ticking "updated Ns ago" ----
+let secs = 2;
+setInterval(()=>{ secs++; document.getElementById('updated').textContent = 'updated ' + secs + 's ago'; }, 1000);
+</script>
+</body>
+</html>

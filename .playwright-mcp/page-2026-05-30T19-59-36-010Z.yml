@@ -1,0 +1,79 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e7]:
+      - generic [ref=e8]:
+        - generic [ref=e9]: Open Design
+        - generic [ref=e10]: Research Preview
+      - generic [ref=e11]: by Nexu Labs
+    - generic [ref=e12]:
+      - tablist [ref=e13]:
+        - tab "Prototype" [selected] [ref=e14] [cursor=pointer]
+        - tab "Slide deck" [ref=e15] [cursor=pointer]
+        - tab "From template" [ref=e16] [cursor=pointer]
+        - tab "Other" [ref=e17] [cursor=pointer]
+      - generic [ref=e18]:
+        - heading "New prototype" [level=3] [ref=e19]
+        - textbox "Project name" [ref=e20]
+        - generic [ref=e21]:
+          - generic [ref=e22]: Design system
+          - button "None — freeform No system tokens, choose your own palette" [ref=e95] [cursor=pointer]:
+            - img [ref=e97]
+            - generic [ref=e100]:
+              - generic [ref=e101]: None — freeform
+              - generic [ref=e102]: No system tokens, choose your own palette
+            - img [ref=e103]
+        - generic [ref=e24]:
+          - generic [ref=e25]: Fidelity
+          - generic [ref=e26]:
+            - button "Wireframe" [ref=e27] [cursor=pointer]:
+              - img [ref=e29]
+              - generic [ref=e39]: Wireframe
+            - button "High fidelity" [pressed] [ref=e40] [cursor=pointer]:
+              - img [ref=e42]
+              - generic [ref=e52]: High fidelity
+        - button "Create" [ref=e53] [cursor=pointer]:
+          - img [ref=e54]
+          - generic [ref=e55]: Create
+        - button "Import Claude Design ZIP" [ref=e56] [cursor=pointer]:
+          - img [ref=e57]
+          - generic [ref=e60]: Import Claude Design ZIP
+      - generic [ref=e61]: Only you can see your project by default.
+    - generic [ref=e62]:
+      - button "Local CLI · Claude Code · 2.1.158 (Claude Code)" [ref=e105] [cursor=pointer]:
+        - img [ref=e64]
+        - generic [ref=e67]: Local CLI
+        - generic [ref=e68]: ·
+        - generic [ref=e69]: Claude Code · 2.1.158 (Claude Code)
+      - button "English" [ref=e71] [cursor=pointer]:
+        - img [ref=e72]
+        - generic [ref=e77]: English
+        - img [ref=e78]
+    - button "Resize sidebar" [ref=e80]
+  - main [ref=e81]:
+    - generic [ref=e82]:
+      - tablist [ref=e83]:
+        - tab "Designs" [selected] [ref=e84] [cursor=pointer]
+        - tab "Examples" [ref=e85] [cursor=pointer]
+        - tab "Design systems" [ref=e86] [cursor=pointer]
+      - button "Open settings" [ref=e88] [cursor=pointer]:
+        - img
+    - generic [ref=e106]:
+      - generic [ref=e107]:
+        - tablist "Filter projects" [ref=e109]:
+          - tab "Recent" [selected] [ref=e110] [cursor=pointer]
+          - tab "Your designs" [ref=e111] [cursor=pointer]
+        - generic [ref=e112]:
+          - generic:
+            - img
+          - textbox "Search…" [ref=e113]
+      - generic [ref=e114]:
+        - button "× Atelier Hub Dashboard Linear · dashboard · 2h ago" [ref=e115] [cursor=pointer]:
+          - button "×" [ref=e116]
+          - generic [ref=e118]:
+            - generic "Atelier Hub Dashboard" [ref=e119]
+            - generic [ref=e120]: Linear · dashboard · 2h ago
+        - button "× Prototype · 5/30/2026 freeform · blog-post · 4h ago" [ref=e121] [cursor=pointer]:
+          - button "×" [ref=e122]
+          - generic [ref=e124]:
+            - generic "Prototype · 5/30/2026" [ref=e125]
+            - generic [ref=e126]: freeform · blog-post · 4h ago

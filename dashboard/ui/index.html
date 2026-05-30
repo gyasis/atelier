@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Atelier Inference Hub — Observability</title>
+<script src="../vendor/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0E0E0E;
+    --panel: #131312;
+    --panel-2: #181816;
+    --line: rgba(255,255,255,0.06);
+    --line-strong: rgba(255,255,255,0.10);
+    --gold: #C8A96E;
+    --gold-dim: rgba(200,169,110,0.16);
+    --text: #EDEAE3;
+    --text-2: #9A958A;
+    --text-3: #63605A;
+    --up: #5FA86B;
+    --busy: #C8A96E;
+    --cold: #55524C;
+    --warn: #C99A52;
+    --cliff: #C2554B;
+    --mono: "SF Mono", ui-monospace, "Berkeley Mono", Menlo, monospace;
+    --sans: Inter, -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  /* ---- Overall layout: 70 / 30 vertical split ---- */
+  .grid {
+    display: grid;
+    grid-template-rows: 1fr minmax(220px, 30vh);
+    height: 100vh;
+    width: 100vw;
+    gap: 1px;
+    background: var(--line);
+  }
+
+  /* ---- MAIN (top 70%) : three panels ---- */
+  .main {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr 1.25fr;
+    gap: 1px;
+    background: var(--line);
+    min-height: 0;
+  }
+
+  .panel {
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .phead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 12px 16px 10px;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+
+  .ptitle {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--text-2);
+    font-weight: 600;
+  }
+  .ptitle .dot {
+    display: inline-block;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--gold);
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+
+  .pbody {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 14px 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* numeric readouts */
+  .big-readout { text-align: right; }
+  .big-readout .n {
+    font-family: var(--mono);
+    font-size: 30px;
+    font-weight: 500;
+    color: var(--gold);
+    line-height: 1;
+    letter-spacing: -0.02em;
+  }
+  .big-readout .u {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-3);
+    margin-left: 3px;
+  }
+  .big-readout .sub {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-2);
+    margin-top: 3px;
+  }
+
+  /* charts fill remaining space */
+  .chart-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
+
+  /* ---- Tenants card grid ---- */
+  .tenant-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    overflow-y: auto;
+    align-content: start;
+    padding-right: 2px;
+  }
+  .tcard {
+    border: 1px solid var(--line-strong);
+    background: var(--panel);
+    padding: 10px 11px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tcard.busy {
+    border-color: var(--gold-dim);
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(200,169,110,0.0); border-color: rgba(200,169,110,0.18); }
+    50% { box-shadow: 0 0 0 1px rgba(200,169,110,0.22); border-color: rgba(200,169,110,0.45); }
+  }
+  .tcard .name {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .tcard .state {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-2);
+    margin-left: auto;
+  }
+  .tcard .metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 6px;
+  }
+  .metric .k {
+    font-size: 8.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .metric .v {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--text);
+    margin-top: 2px;
+  }
+  .metric .v.accent { color: var(--gold); }
+
+  .sdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .sdot.up { background: var(--up); box-shadow: 0 0 6px rgba(95,168,107,0.6); }
+  .sdot.busy { background: var(--busy); box-shadow: 0 0 6px rgba(200,169,110,0.6); }
+  .sdot.cold { background: var(--cold); }
+
+  /* ---- Tables ---- */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); }
+  th {
+    font-family: var(--sans);
+    font-size: 8.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    text-align: left;
+    font-weight: 600;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+  td {
+    font-size: 11px;
+    color: var(--text);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  td.muted { color: var(--text-2); }
+  .tbl-scroll { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+
+  .pill {
+    font-family: var(--sans);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 7px;
+    border: 1px solid var(--line-strong);
+    color: var(--text-2);
+  }
+  .pill.done { color: var(--up); border-color: rgba(95,168,107,0.35); }
+  .pill.run  { color: var(--gold); border-color: rgba(200,169,110,0.4); }
+  .pill.queue { color: var(--text-3); }
+  .pill.fail { color: var(--cliff); border-color: rgba(194,85,75,0.4); }
+
+  /* ---- Gantt / swimlane ---- */
+  .gantt {
+    flex: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 8px 10px 6px;
+    margin-bottom: 12px;
+  }
+  .gantt-title {
+    font-size: 8.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin-bottom: 7px;
+  }
+  .lane {
+    display: grid;
+    grid-template-columns: 78px 1fr;
+    align-items: center;
+    gap: 8px;
+    height: 16px;
+    margin-bottom: 3px;
+  }
+  .lane .ln {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--text-2);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .track { position: relative; height: 9px; background: rgba(255,255,255,0.025); }
+  .bar { position: absolute; top: 0; height: 9px; opacity: 0.85; }
+  .axis {
+    display: flex; justify-content: space-between;
+    font-family: var(--mono); font-size: 8px; color: var(--text-3);
+    margin-top: 4px; padding-left: 86px;
+  }
+
+  /* ---- HUD (bottom 30%) ---- */
+  .hud {
+    display: grid;
+    grid-template-columns: 0.85fr 1.15fr 1.25fr;
+    gap: 1px;
+    background: var(--line);
+    min-height: 0;
+  }
+  .hud .panel { background: var(--panel-2); }
+  .hud-stack {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 1fr 1fr;
+    gap: 10px;
+  }
+  .mini-label {
+    font-size: 8px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin-bottom: 2px;
+  }
+  .mini-wrap { position: relative; min-height: 0; }
+
+  .legend { display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+  .lg-row { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; }
+  .lg-sw { width: 8px; height: 8px; flex: none; }
+  .lg-row .gb { margin-left: auto; color: var(--text-2); }
+  .pie-flex { display: grid; grid-template-columns: 1fr 0.9fr; gap: 12px; flex:1 1 auto; min-height:0; align-items:center; }
+
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="grid">
+
+  <!-- ===================== MAIN (top 70%) ===================== -->
+  <main class="main">
+
+    <!-- Panel 1 : Memory -->
+    <section class="panel" data-od-id="memory-panel">
+      <div class="phead">
+        <span class="ptitle"><span class="dot"></span>Resident Memory</span>
+        <span class="big-readout">
+          <span class="n">38.4</span><span class="u">GB</span>
+          <div class="sub">of 64GB · +2.1 / 5m</div>
+        </span>
+      </div>
+      <div class="pbody">
+        <div class="chart-wrap"><canvas id="memChart"></canvas></div>
+      </div>
+    </section>
+
+    <!-- Panel 2 : Tenants -->
+    <section class="panel" data-od-id="tenants-panel">
+      <div class="phead">
+        <span class="ptitle"><span class="dot"></span>Tenants / Sidecars</span>
+        <span class="big-readout"><span class="n" style="font-size:22px">5</span><span class="u">loaded</span></span>
+      </div>
+      <div class="pbody">
+        <div class="tenant-grid">
+          <div class="tcard busy" data-od-id="tenant-omnivoice">
+            <div class="name"><span class="sdot busy"></span>omnivoice<span class="state">busy</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v accent">3</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">7</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">18.0</div></div>
+            </div>
+          </div>
+          <div class="tcard" data-od-id="tenant-kokoro">
+            <div class="name"><span class="sdot up"></span>kokoro<span class="state">up</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">4.0</div></div>
+            </div>
+          </div>
+          <div class="tcard busy" data-od-id="tenant-comfyui">
+            <div class="name"><span class="sdot busy"></span>comfyui<span class="state">busy</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v accent">1</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">2</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">12.0</div></div>
+            </div>
+          </div>
+          <div class="tcard" data-od-id="tenant-ollama">
+            <div class="name"><span class="sdot up"></span>qwen3:32b<span class="state">up</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">1</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">20.0</div></div>
+            </div>
+          </div>
+          <div class="tcard" data-od-id="tenant-whisper">
+            <div class="name"><span class="sdot cold"></span>whisper-lg<span class="state">cold</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">0.0</div></div>
+            </div>
+          </div>
+          <div class="tcard" data-od-id="tenant-flux">
+            <div class="name"><span class="sdot cold"></span>flux-schnell<span class="state">cold</span></div>
+            <div class="metrics">
+              <div class="metric"><div class="k">jobs</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">queue</div><div class="v">0</div></div>
+              <div class="metric"><div class="k">mem</div><div class="v">0.0</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Panel 3 : Task time-series -->
+    <section class="panel" data-od-id="tasks-panel">
+      <div class="phead">
+        <span class="ptitle"><span class="dot"></span>Task Stream</span>
+        <span class="big-readout"><span class="n" style="font-size:22px">14</span><span class="u">/hr</span></span>
+      </div>
+      <div class="pbody">
+        <div class="gantt" data-od-id="task-gantt">
+          <div class="gantt-title">Activity — last 60 min</div>
+          <div id="lanes"></div>
+          <div class="axis"><span>-60m</span><span>-45m</span><span>-30m</span><span>-15m</span><span>now</span></div>
+        </div>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Task</th><th>Start</th><th>Dur</th><th>Status</th></tr></thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ===================== SCENE INFO HUD (bottom 30%) ===================== -->
+  <footer class="hud" data-od-id="scene-info-hud">
+
+    <!-- HUD left : Pie -->
+    <section class="panel" data-od-id="hud-pie">
+      <div class="phead"><span class="ptitle"><span class="dot"></span>Loaded Now · 64GB</span></div>
+      <div class="pbody">
+        <div class="pie-flex">
+          <div class="mini-wrap" style="height:100%"><canvas id="pieChart"></canvas></div>
+          <div class="legend" id="pieLegend"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HUD center : stacked line graphs -->
+    <section class="panel" data-od-id="hud-lines">
+      <div class="phead"><span class="ptitle"><span class="dot"></span>Inference Latency · last 20 req</span></div>
+      <div class="pbody">
+        <div class="hud-stack">
+          <div style="display:flex;flex-direction:column;min-height:0">
+            <div class="mini-label">Time to First Token (ms) · warn 800</div>
+            <div class="mini-wrap" style="flex:1 1 auto"><canvas id="ttftChart"></canvas></div>
+          </div>
+          <div style="display:flex;flex-direction:column;min-height:0">
+            <div class="mini-label">Generation (tokens/sec) · warn 30</div>
+            <div class="mini-wrap" style="flex:1 1 auto"><canvas id="tpsChart"></canvas></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- HUD right : status table -->
+    <section class="panel" data-od-id="hud-status">
+      <div class="phead"><span class="ptitle"><span class="dot"></span>Sidecar Status</span></div>
+      <div class="pbody" style="padding-top:0">
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Sidecar</th><th></th><th>Since</th><th>TTFT</th><th>Tok total</th></tr></thead>
+            <tbody>
+              <tr><td>omnivoice</td><td><span class="sdot busy"></span></td><td class="muted">14:02</td><td>412ms</td><td>1.84M</td></tr>
+              <tr><td>kokoro</td><td><span class="sdot up"></span></td><td class="muted">09:31</td><td>189ms</td><td>0.42M</td></tr>
+              <tr><td>comfyui</td><td><span class="sdot busy"></span></td><td class="muted">11:47</td><td>—</td><td>—</td></tr>
+              <tr><td>qwen3:32b</td><td><span class="sdot up"></span></td><td class="muted">08:15</td><td>638ms</td><td>9.21M</td></tr>
+              <tr><td>whisper-lg</td><td><span class="sdot cold"></span></td><td class="muted">—</td><td>—</td><td>3.07M</td></tr>
+              <tr><td>flux-schnell</td><td><span class="sdot cold"></span></td><td class="muted">—</td><td>—</td><td>0.00M</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </footer>
+</div>
+
+<script>
+const GOLD = "#C8A96E", TEXT3 = "#63605A", TEXT2 = "#9A958A", GRID = "rgba(255,255,255,0.05)";
+const mono = '"SF Mono", ui-monospace, Menlo, monospace';
+
+Chart.defaults.font.family = mono;
+Chart.defaults.font.size = 9;
+Chart.defaults.color = TEXT3;
+Chart.defaults.animation = { duration: 600 };
+
+// ---- seeded pseudo-random for stable mock data ----
+let seed = 42;
+function rnd(){ seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+
+// ---------- Memory area chart (60 samples) ----------
+const memN = 60, memData = [], memLabels = [];
+let m = 22;
+for (let i = 0; i < memN; i++){
+  m += (rnd() - 0.42) * 1.8;
+  m = Math.max(18, Math.min(52, m));
+  memData.push(+m.toFixed(1));
+  memLabels.push(i);
+}
+memData[memN-1] = 38.4;
+
+function thresholdLine(val, color, dash){
+  return { type:'line', borderColor:color, borderWidth:1, borderDash:dash||[4,4],
+    data: new Array(memN).fill(val), pointRadius:0, fill:false, tension:0 };
+}
+
+new Chart(document.getElementById('memChart'), {
+  type:'line',
+  data:{ labels: memLabels, datasets:[
+    { data: memData, borderColor: GOLD, borderWidth: 1.5, pointRadius: 0, tension: 0.3,
+      fill: true, backgroundColor:(c)=>{ const ctx=c.chart.ctx; const g=ctx.createLinearGradient(0,0,0,c.chart.height);
+        g.addColorStop(0,'rgba(200,169,110,0.22)'); g.addColorStop(1,'rgba(200,169,110,0.0)'); return g; } },
+    { ...thresholdLine(45, '#C99A52', [5,4]) },
+    { ...thresholdLine(55, '#C2554B', [5,4]) },
+  ]},
+  options:{ maintainAspectRatio:false, responsive:true,
+    plugins:{ legend:{display:false}, tooltip:{enabled:true,
+      callbacks:{ title:()=>'', label:(c)=> c.datasetIndex===0 ? c.parsed.y+' GB' : null } } },
+    scales:{ x:{ display:false, grid:{display:false} },
+      y:{ min:14, max:60, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
+});
+
+// ---------- Pie : loaded now ----------
+const pieSlices = [
+  { l:'omnivoice', gb:18, c:'#C8A96E' },
+  { l:'kokoro',    gb:4,  c:'#8C7A55' },
+  { l:'comfyui',   gb:12, c:'#A98B5C' },
+  { l:'qwen3:32b', gb:20, c:'#D9C091' },
+  { l:'free',      gb:10, c:'#2A2A28' },
+];
+new Chart(document.getElementById('pieChart'), {
+  type:'doughnut',
+  data:{ labels: pieSlices.map(s=>s.l),
+    datasets:[{ data: pieSlices.map(s=>s.gb), backgroundColor: pieSlices.map(s=>s.c),
+      borderColor:'#0E0E0E', borderWidth:2 }] },
+  options:{ maintainAspectRatio:false, responsive:true, cutout:'58%',
+    plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>c.label+' '+c.parsed+'GB' } } } }
+});
+document.getElementById('pieLegend').innerHTML = pieSlices.map(s=>
+  `<div class="lg-row"><span class="lg-sw" style="background:${s.c}"></span>${s.l}<span class="gb">${s.gb}GB</span></div>`
+).join('');
+
+// ---------- TTFT + tokens/sec line graphs (last 20 req) ----------
+const reqN = 20;
+const ttft = [], tps = [];
+let t = 500, p = 42;
+for (let i=0;i<reqN;i++){
+  t += (rnd()-0.45)*180; t = Math.max(160, Math.min(1100, t)); ttft.push(Math.round(t));
+  p += (rnd()-0.5)*9; p = Math.max(18, Math.min(70, p)); tps.push(Math.round(p));
+}
+
+function miniLine(id, data, warn, max){
+  new Chart(document.getElementById(id), {
+    type:'line',
+    data:{ labels: data.map((_,i)=>i+1), datasets:[
+      { data, borderColor: GOLD, borderWidth:1.4, pointRadius:0, tension:0.25,
+        fill:true, backgroundColor:'rgba(200,169,110,0.10)' },
+      { data:new Array(reqN).fill(warn), borderColor:'#C99A52', borderWidth:1,
+        borderDash:[4,3], pointRadius:0, fill:false } ]},
+    options:{ maintainAspectRatio:false, responsive:true,
+      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ title:()=>'', label:c=>c.datasetIndex===0?c.parsed.y:null } } },
+      scales:{ x:{ display:false, grid:{display:false} },
+        y:{ min:0, max, grid:{color:GRID}, ticks:{ maxTicksLimit:3 } } } }
+  });
+}
+miniLine('ttftChart', ttft, 800, 1200);
+miniLine('tpsChart', tps, 30, 75);
+
+// ---------- Gantt swimlanes (last 60 min) ----------
+const laneDefs = [
+  { name:'omnivoice', c:'#C8A96E' },
+  { name:'comfyui',   c:'#A98B5C' },
+  { name:'qwen3:32b', c:'#D9C091' },
+  { name:'kokoro',    c:'#8C7A55' },
+];
+let lanesHTML = '';
+laneDefs.forEach(ln=>{
+  let bars = '';
+  let cursor = 0;
+  while (cursor < 100){
+    cursor += rnd()*14;
+    const w = 3 + rnd()*16;
+    if (cursor + w > 100) break;
+    bars += `<span class="bar" style="left:${cursor.toFixed(1)}%;width:${w.toFixed(1)}%;background:${ln.c}"></span>`;
+    cursor += w + rnd()*6;
+  }
+  lanesHTML += `<div class="lane"><span class="ln">${ln.name}</span><span class="track">${bars}</span></div>`;
+});
+document.getElementById('lanes').innerHTML = lanesHTML;
+
+// ---------- Task table ----------
+const tasks = [
+  ['tts.synthesize#8841','14:21:09','3.2s','run'],
+  ['img.generate#8840','14:20:58','—','run'],
+  ['chat.complete#8839','14:20:41','1.8s','done'],
+  ['tts.synthesize#8838','14:20:12','2.9s','done'],
+  ['embed.batch#8837','14:19:55','0.6s','done'],
+  ['chat.complete#8836','14:19:30','—','queue'],
+  ['img.generate#8835','14:18:44','11.4s','done'],
+  ['asr.transcribe#8834','14:18:02','—','fail'],
+  ['chat.complete#8833','14:17:39','2.1s','done'],
+  ['tts.synthesize#8832','14:16:51','3.0s','done'],
+  ['embed.batch#8831','14:16:08','0.7s','done'],
+];
+document.getElementById('taskRows').innerHTML = tasks.map(([n,s,d,st])=>
+  `<tr><td>${n}</td><td class="muted">${s}</td><td>${d}</td><td><span class="pill ${st}">${st}</span></td></tr>`
+).join('');
+</script>
+</body>
+</html>

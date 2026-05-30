@@ -28,12 +28,6 @@ Concretely, this means:
 
 > If you can't see what it's doing, it doesn't ship. No black boxes.
 
-> **Global source of truth:** this Principle is the Atelier-specific instantiation
-> of the global engineering rule in `~/.claude/CLAUDE.md` → *"Engineering discipline"*
-> §5 (Observability is a founding principle — observable for both humans and agents,
-> no black boxes). Keep them in sync; the global rule wins on conflict.
-> Linked 2026-05-30.
-
 ## II. Memory-economy — idle models free their memory
 
 The Mac Studio's 64 GB unified memory is the scarce resource and the swap cliff (~55 GB)

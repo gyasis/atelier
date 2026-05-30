@@ -1,0 +1,1 @@
+/Users/gyasisutton/.dev-kid/templates/.claude/hooks/session-start.sh

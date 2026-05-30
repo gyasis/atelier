@@ -1,0 +1,333 @@
+- generic [ref=e236]:
+  - generic [ref=e237]:
+    - generic [ref=e238]:
+      - button "Back to projects" [ref=e239] [cursor=pointer]:
+        - img [ref=e240]
+      - generic [ref=e243]:
+        - textbox [ref=e244]
+        - generic [ref=e245]: dashboard · Linear
+    - button "Account & settings" [ref=e248] [cursor=pointer]:
+      - img
+  - generic [ref=e249]:
+    - generic [ref=e250]:
+      - generic [ref=e251]:
+        - tablist [ref=e252]:
+          - tab "Chat" [selected] [ref=e253] [cursor=pointer]
+          - tab "Comments" [disabled] [ref=e254]
+        - generic [ref=e255]:
+          - button "Conversation history" [ref=e257] [cursor=pointer]:
+            - img [ref=e258]
+          - button "New conversation" [ref=e262] [cursor=pointer]:
+            - img [ref=e263]
+      - generic [ref=e266]:
+        - generic [ref=e267]: You
+        - generic [ref=e268]: "Compact this into a smaller widget version — a \"mini HUD card\" format designed to sit in the bottom corner of any screen (think a floating overlay, not a full page). Keep the dark gold aesthetic. Layout: a single compact card, roughly 420×320px, fixed position, with these sections stacked: TOP ROW (one line): Memory pill (resident GB / CLIFF) · Tenants count · Active jobs — all in one tight status bar MIDDLE (main body): The Scene Info — a small pie chart (left, 80px) showing loaded models GB + a right column with the 3 most-active sidecars as mini rows (name · state dot · mem · jobs) BOTTOM ROW: Mini inline line graph — tokens/sec last 10 req, spans full width, very compact (40px tall). BOTTOM CORNER: A pulsing green \"● LIVE\" indicator, bottom-right of the card, with a last-updated timestamp next to it (e.g. \"updated 2s ago\"). The card should have a slight backdrop-blur, semi-transparent dark panel (#0E0E0E at 0.92 opacity), 1px gold border, no scrollbars. Self-contained HTML, Chart.js CDN. Mock data. No full-page layout — just the floating card centered on a dark background for preview."
+      - generic [ref=e269]:
+        - generic [ref=e270]:
+          - textbox "Describe the design you want — paste or drop images, or @ a file…" [active] [ref=e272]
+          - generic [ref=e273]:
+            - button "Open CLI and model settings" [ref=e274] [cursor=pointer]:
+              - img [ref=e275]
+            - button "Attach files" [ref=e276] [cursor=pointer]:
+              - img [ref=e277]
+            - button "Import" [ref=e281] [cursor=pointer]:
+              - img [ref=e282]
+              - generic [ref=e285]: Import
+              - img [ref=e286]
+            - button "Send" [disabled] [ref=e288]:
+              - img [ref=e289]
+              - generic [ref=e292]: Send
+        - generic [ref=e293]: ⌘/Ctrl + Enter to send · paste images · @ to reference files
+    - generic [ref=e294]:
+      - tablist "Design Files" [ref=e295]:
+        - tab "Design Files" [ref=e296] [cursor=pointer]:
+          - img [ref=e298]
+          - generic [ref=e303]: Design Files
+        - tab "atelier-hub-dashboard.html" [selected] [ref=e304] [cursor=pointer]:
+          - img [ref=e306]
+          - generic [ref=e311]: atelier-hub-dashboard.html
+          - button "Close tab" [ref=e312]:
+            - img [ref=e313]
+      - generic [ref=e317]:
+        - generic [ref=e318]:
+          - generic [ref=e319]:
+            - button "Reload" [ref=e320] [cursor=pointer]:
+              - img [ref=e321]
+            - button "Tweaks Coming soon" [disabled] [ref=e324]:
+              - img [ref=e325]
+              - generic [ref=e329]: Tweaks
+              - text: Coming soon
+          - generic [ref=e331]:
+            - generic [ref=e332]:
+              - button "Preview" [ref=e333] [cursor=pointer]
+              - button "Source" [ref=e334] [cursor=pointer]
+            - button "Comment Coming soon" [disabled] [ref=e336]:
+              - img [ref=e337]
+              - generic [ref=e339]: Comment
+              - text: Coming soon
+            - button "Edit Coming soon" [disabled] [ref=e340]:
+              - img [ref=e341]
+              - generic [ref=e344]: Edit
+              - text: Coming soon
+            - button "Draw Coming soon" [disabled] [ref=e345]:
+              - img [ref=e346]
+              - generic [ref=e349]: Draw
+              - text: Coming soon
+            - button "Zoom out" [ref=e351] [cursor=pointer]:
+              - img [ref=e352]
+            - button "100%" [ref=e353] [cursor=pointer]:
+              - generic [ref=e354]: 100%
+            - button "Zoom in" [ref=e355] [cursor=pointer]:
+              - img [ref=e356]
+            - button "Share" [ref=e359] [cursor=pointer]:
+              - generic [ref=e360]: Share
+              - img [ref=e361]
+        - iframe [ref=e365]:
+          - generic [ref=f1e2]:
+            - main [ref=f1e3]:
+              - generic [ref=f1e5]:
+                - generic [ref=f1e6]: Resident Memory
+                - generic [ref=f1e8]:
+                  - text: 38.4GB
+                  - generic [ref=f1e9]: of 64GB · +2.1 / 5m
+              - generic [ref=f1e13]:
+                - generic [ref=f1e14]:
+                  - generic [ref=f1e15]: Tenants / Sidecars
+                  - generic [ref=f1e17]: 5loaded
+                - generic [ref=f1e19]:
+                  - generic [ref=f1e20]:
+                    - generic [ref=f1e21]:
+                      - text: omnivoice
+                      - generic [ref=f1e23]: busy
+                    - generic [ref=f1e24]:
+                      - generic [ref=f1e25]:
+                        - generic [ref=f1e26]: jobs
+                        - generic [ref=f1e27]: "3"
+                      - generic [ref=f1e28]:
+                        - generic [ref=f1e29]: queue
+                        - generic [ref=f1e30]: "7"
+                      - generic [ref=f1e31]:
+                        - generic [ref=f1e32]: mem
+                        - generic [ref=f1e33]: "18.0"
+                  - generic [ref=f1e34]:
+                    - generic [ref=f1e35]:
+                      - text: kokoro
+                      - generic [ref=f1e37]: up
+                    - generic [ref=f1e38]:
+                      - generic [ref=f1e39]:
+                        - generic [ref=f1e40]: jobs
+                        - generic [ref=f1e41]: "0"
+                      - generic [ref=f1e42]:
+                        - generic [ref=f1e43]: queue
+                        - generic [ref=f1e44]: "0"
+                      - generic [ref=f1e45]:
+                        - generic [ref=f1e46]: mem
+                        - generic [ref=f1e47]: "4.0"
+                  - generic [ref=f1e48]:
+                    - generic [ref=f1e49]:
+                      - text: comfyui
+                      - generic [ref=f1e51]: busy
+                    - generic [ref=f1e52]:
+                      - generic [ref=f1e53]:
+                        - generic [ref=f1e54]: jobs
+                        - generic [ref=f1e55]: "1"
+                      - generic [ref=f1e56]:
+                        - generic [ref=f1e57]: queue
+                        - generic [ref=f1e58]: "2"
+                      - generic [ref=f1e59]:
+                        - generic [ref=f1e60]: mem
+                        - generic [ref=f1e61]: "12.0"
+                  - generic [ref=f1e62]:
+                    - generic [ref=f1e63]:
+                      - text: qwen3:32b
+                      - generic [ref=f1e65]: up
+                    - generic [ref=f1e66]:
+                      - generic [ref=f1e67]:
+                        - generic [ref=f1e68]: jobs
+                        - generic [ref=f1e69]: "0"
+                      - generic [ref=f1e70]:
+                        - generic [ref=f1e71]: queue
+                        - generic [ref=f1e72]: "1"
+                      - generic [ref=f1e73]:
+                        - generic [ref=f1e74]: mem
+                        - generic [ref=f1e75]: "20.0"
+                  - generic [ref=f1e76]:
+                    - generic [ref=f1e77]:
+                      - text: whisper-lg
+                      - generic [ref=f1e79]: cold
+                    - generic [ref=f1e80]:
+                      - generic [ref=f1e81]:
+                        - generic [ref=f1e82]: jobs
+                        - generic [ref=f1e83]: "0"
+                      - generic [ref=f1e84]:
+                        - generic [ref=f1e85]: queue
+                        - generic [ref=f1e86]: "0"
+                      - generic [ref=f1e87]:
+                        - generic [ref=f1e88]: mem
+                        - generic [ref=f1e89]: "0.0"
+                  - generic [ref=f1e90]:
+                    - generic [ref=f1e91]:
+                      - text: flux-schnell
+                      - generic [ref=f1e93]: cold
+                    - generic [ref=f1e94]:
+                      - generic [ref=f1e95]:
+                        - generic [ref=f1e96]: jobs
+                        - generic [ref=f1e97]: "0"
+                      - generic [ref=f1e98]:
+                        - generic [ref=f1e99]: queue
+                        - generic [ref=f1e100]: "0"
+                      - generic [ref=f1e101]:
+                        - generic [ref=f1e102]: mem
+                        - generic [ref=f1e103]: "0.0"
+              - generic [ref=f1e104]:
+                - generic [ref=f1e105]:
+                  - generic [ref=f1e106]: Task Stream
+                  - generic [ref=f1e108]: 14/hr
+                - generic [ref=f1e109]:
+                  - generic [ref=f1e110]:
+                    - generic [ref=f1e111]: Activity — last 60 min
+                    - generic [ref=f1e112]:
+                      - generic [ref=f1e114]: omnivoice
+                      - generic [ref=f1e121]: comfyui
+                      - generic [ref=f1e129]: qwen3:32b
+                      - generic [ref=f1e137]: kokoro
+                    - generic [ref=f1e144]:
+                      - generic [ref=f1e145]: "-60m"
+                      - generic [ref=f1e146]: "-45m"
+                      - generic [ref=f1e147]: "-30m"
+                      - generic [ref=f1e148]: "-15m"
+                      - generic [ref=f1e149]: now
+                  - table [ref=f1e151]:
+                    - rowgroup [ref=f1e152]:
+                      - row "Task Start Dur Status" [ref=f1e153]:
+                        - columnheader "Task" [ref=f1e154]
+                        - columnheader "Start" [ref=f1e155]
+                        - columnheader "Dur" [ref=f1e156]
+                        - columnheader "Status" [ref=f1e157]
+                    - rowgroup [ref=f1e158]:
+                      - row "tts.synthesize#8841 14:21:09 3.2s run" [ref=f1e159]:
+                        - cell "tts.synthesize#8841" [ref=f1e160]
+                        - cell "14:21:09" [ref=f1e161]
+                        - cell "3.2s" [ref=f1e162]
+                        - cell "run" [ref=f1e163]
+                      - row "img.generate#8840 14:20:58 — run" [ref=f1e164]:
+                        - cell "img.generate#8840" [ref=f1e165]
+                        - cell "14:20:58" [ref=f1e166]
+                        - cell "—" [ref=f1e167]
+                        - cell "run" [ref=f1e168]
+                      - row "chat.complete#8839 14:20:41 1.8s done" [ref=f1e169]:
+                        - cell "chat.complete#8839" [ref=f1e170]
+                        - cell "14:20:41" [ref=f1e171]
+                        - cell "1.8s" [ref=f1e172]
+                        - cell "done" [ref=f1e173]
+                      - row "tts.synthesize#8838 14:20:12 2.9s done" [ref=f1e174]:
+                        - cell "tts.synthesize#8838" [ref=f1e175]
+                        - cell "14:20:12" [ref=f1e176]
+                        - cell "2.9s" [ref=f1e177]
+                        - cell "done" [ref=f1e178]
+                      - row "embed.batch#8837 14:19:55 0.6s done" [ref=f1e179]:
+                        - cell "embed.batch#8837" [ref=f1e180]
+                        - cell "14:19:55" [ref=f1e181]
+                        - cell "0.6s" [ref=f1e182]
+                        - cell "done" [ref=f1e183]
+                      - row "chat.complete#8836 14:19:30 — queue" [ref=f1e184]:
+                        - cell "chat.complete#8836" [ref=f1e185]
+                        - cell "14:19:30" [ref=f1e186]
+                        - cell "—" [ref=f1e187]
+                        - cell "queue" [ref=f1e188]
+                      - row "img.generate#8835 14:18:44 11.4s done" [ref=f1e189]:
+                        - cell "img.generate#8835" [ref=f1e190]
+                        - cell "14:18:44" [ref=f1e191]
+                        - cell "11.4s" [ref=f1e192]
+                        - cell "done" [ref=f1e193]
+                      - row "asr.transcribe#8834 14:18:02 — fail" [ref=f1e194]:
+                        - cell "asr.transcribe#8834" [ref=f1e195]
+                        - cell "14:18:02" [ref=f1e196]
+                        - cell "—" [ref=f1e197]
+                        - cell "fail" [ref=f1e198]
+                      - row "chat.complete#8833 14:17:39 2.1s done" [ref=f1e199]:
+                        - cell "chat.complete#8833" [ref=f1e200]
+                        - cell "14:17:39" [ref=f1e201]
+                        - cell "2.1s" [ref=f1e202]
+                        - cell "done" [ref=f1e203]
+                      - row "tts.synthesize#8832 14:16:51 3.0s done" [ref=f1e204]:
+                        - cell "tts.synthesize#8832" [ref=f1e205]
+                        - cell "14:16:51" [ref=f1e206]
+                        - cell "3.0s" [ref=f1e207]
+                        - cell "done" [ref=f1e208]
+                      - row "embed.batch#8831 14:16:08 0.7s done" [ref=f1e209]:
+                        - cell "embed.batch#8831" [ref=f1e210]
+                        - cell "14:16:08" [ref=f1e211]
+                        - cell "0.7s" [ref=f1e212]
+                        - cell "done" [ref=f1e213]
+            - contentinfo [ref=f1e214]:
+              - generic [ref=f1e215]:
+                - generic [ref=f1e217]: Loaded Now · 64GB
+                - generic [ref=f1e223]:
+                  - generic [ref=f1e224]:
+                    - text: omnivoice
+                    - generic [ref=f1e226]: 18GB
+                  - generic [ref=f1e227]:
+                    - text: kokoro
+                    - generic [ref=f1e229]: 4GB
+                  - generic [ref=f1e230]:
+                    - text: comfyui
+                    - generic [ref=f1e232]: 12GB
+                  - generic [ref=f1e233]:
+                    - text: qwen3:32b
+                    - generic [ref=f1e235]: 20GB
+                  - generic [ref=f1e236]:
+                    - text: free
+                    - generic [ref=f1e238]: 10GB
+              - generic [ref=f1e239]:
+                - generic [ref=f1e241]: Inference Latency · last 20 req
+                - generic [ref=f1e244]:
+                  - generic [ref=f1e246]: Time to First Token (ms) · warn 800
+                  - generic [ref=f1e250]: Generation (tokens/sec) · warn 30
+              - generic [ref=f1e253]:
+                - generic [ref=f1e255]: Sidecar Status
+                - table [ref=f1e259]:
+                  - rowgroup [ref=f1e260]:
+                    - row "Sidecar Since TTFT Tok total" [ref=f1e261]:
+                      - columnheader "Sidecar" [ref=f1e262]
+                      - columnheader [ref=f1e263]
+                      - columnheader "Since" [ref=f1e264]
+                      - columnheader "TTFT" [ref=f1e265]
+                      - columnheader "Tok total" [ref=f1e266]
+                  - rowgroup [ref=f1e267]:
+                    - row "omnivoice 14:02 412ms 1.84M" [ref=f1e268]:
+                      - cell "omnivoice" [ref=f1e269]
+                      - cell [ref=f1e270]
+                      - cell "14:02" [ref=f1e271]
+                      - cell "412ms" [ref=f1e272]
+                      - cell "1.84M" [ref=f1e273]
+                    - row "kokoro 09:31 189ms 0.42M" [ref=f1e274]:
+                      - cell "kokoro" [ref=f1e275]
+                      - cell [ref=f1e276]
+                      - cell "09:31" [ref=f1e277]
+                      - cell "189ms" [ref=f1e278]
+                      - cell "0.42M" [ref=f1e279]
+                    - row "comfyui 11:47 — —" [ref=f1e280]:
+                      - cell "comfyui" [ref=f1e281]
+                      - cell [ref=f1e282]
+                      - cell "11:47" [ref=f1e283]
+                      - cell "—" [ref=f1e284]
+                      - cell "—" [ref=f1e285]
+                    - row "qwen3:32b 08:15 638ms 9.21M" [ref=f1e286]:
+                      - cell "qwen3:32b" [ref=f1e287]
+                      - cell [ref=f1e288]
+                      - cell "08:15" [ref=f1e289]
+                      - cell "638ms" [ref=f1e290]
+                      - cell "9.21M" [ref=f1e291]
+                    - row "whisper-lg — — 3.07M" [ref=f1e292]:
+                      - cell "whisper-lg" [ref=f1e293]
+                      - cell [ref=f1e294]
+                      - cell "—" [ref=f1e295]
+                      - cell "—" [ref=f1e296]
+                      - cell "3.07M" [ref=f1e297]
+                    - row "flux-schnell — — 0.00M" [ref=f1e298]:
+                      - cell "flux-schnell" [ref=f1e299]
+                      - cell [ref=f1e300]
+                      - cell "—" [ref=f1e301]
+                      - cell "—" [ref=f1e302]
+                      - cell "0.00M" [ref=f1e303]

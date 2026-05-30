@@ -1,0 +1,1 @@
+/Users/gyasisutton/.dev-kid/templates/.claude/hooks/pre-tool-use.sh

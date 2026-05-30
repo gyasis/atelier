@@ -1,0 +1,267 @@
+- generic [ref=e236]:
+  - generic [ref=e237]:
+    - generic [ref=e238]:
+      - button "Back to projects" [ref=e239] [cursor=pointer]:
+        - img [ref=e240]
+      - generic [ref=e243]:
+        - textbox [ref=e244]
+        - generic [ref=e245]: dashboard · Linear
+    - button "Account & settings" [ref=e248] [cursor=pointer]:
+      - img
+  - generic [ref=e249]:
+    - generic [ref=e250]:
+      - generic [ref=e251]:
+        - tablist [ref=e252]:
+          - tab "Chat" [selected] [ref=e253] [cursor=pointer]
+          - tab "Comments" [disabled] [ref=e254]
+        - generic [ref=e255]:
+          - button "Conversation history" [ref=e257] [cursor=pointer]:
+            - img [ref=e258]
+          - button "New conversation" [ref=e262] [cursor=pointer]:
+            - img [ref=e263]
+      - generic [ref=e265]:
+        - generic [ref=e266]:
+          - generic [ref=e267]: You
+          - generic [ref=e268]: "Compact this into a smaller widget version — a \"mini HUD card\" format designed to sit in the bottom corner of any screen (think a floating overlay, not a full page). Keep the dark gold aesthetic. Layout: a single compact card, roughly 420×320px, fixed position, with these sections stacked: TOP ROW (one line): Memory pill (resident GB / CLIFF) · Tenants count · Active jobs — all in one tight status bar MIDDLE (main body): The Scene Info — a small pie chart (left, 80px) showing loaded models GB + a right column with the 3 most-active sidecars as mini rows (name · state dot · mem · jobs) BOTTOM ROW: Mini inline line graph — tokens/sec last 10 req, spans full width, very compact (40px tall). BOTTOM CORNER: A pulsing green \"● LIVE\" indicator, bottom-right of the card, with a last-updated timestamp next to it (e.g. \"updated 2s ago\"). The card should have a slight backdrop-blur, semi-transparent dark panel (#0E0E0E at 0.92 opacity), 1px gold border, no scrollbars. Self-contained HTML, Chart.js CDN. Mock data. No full-page layout — just the floating card centered on a dark background for preview."
+        - generic [ref=e366]:
+          - generic [ref=e367]: You
+          - generic [ref=e368]: "Make a compact floating mini-HUD card version of this dashboard — a small overlay widget (~420×320px) that sits in the bottom corner of a screen. Keep #0E0E0E dark gold aesthetic, 1px gold border, backdrop-blur, 0.92 opacity. Layout top to bottom: 1. TOP BAR (one tight line): memory pill \"38.4 / 55GB\" colored by pressure · separator · \"5 tenants\" · separator · \"4 active jobs\" 2. MIDDLE ROW: left = 90px doughnut pie of loaded GB (omnivoice/kokoro/comfyui/qwen3/free, same gold palette) · right = 3 busiest sidecar rows (name · state dot · mem GB · jobs count) 3. BOTTOM: compact 40px-tall inline line chart — tokens/sec last 10 requests, full card width, Chart.js CDN 4. VERY BOTTOM RIGHT corner inside card: pulsing green ● LIVE · \"updated 2s ago\" timestamp No scrollbars. Center the card on a dark page background for preview. Self-contained HTML."
+        - generic [ref=e369]:
+          - generic [ref=e370]: Claude
+          - generic [ref=e371]:
+            - generic [ref=e381]:
+              - generic [ref=e382]: initializing
+              - generic [ref=e383]: claude-opus-4-8[1m]
+            - button "Thinking" [ref=e385] [cursor=pointer]:
+              - img [ref=e387]
+              - generic [ref=e389]: Thinking
+              - img [ref=e391]
+            - paragraph [ref=e394]: I'll look at the existing dashboard to match its aesthetic, then build the compact mini-HUD card.
+            - generic [ref=e396]:
+              - generic [ref=e397]: ↗
+              - generic [ref=e398]: Read
+              - code [ref=e399]: /Users/gyasisutton/Documents/code/open-design/.od/projects/atelier-hub-dashboard/atelier-hub-dashboard.html
+              - generic [ref=e400]: done
+              - button "open" [ref=e401] [cursor=pointer]
+            - button "Thinking" [ref=e403] [cursor=pointer]:
+              - img [ref=e405]
+              - generic [ref=e407]: Thinking
+              - img [ref=e409]
+            - paragraph [ref=e412]: This is a focused variant of the existing dashboard with a complete spec — I'll skip discovery and build it directly, reusing the dark-gold tokens and mock data from your full dashboard.
+            - generic [ref=e414]:
+              - generic [ref=e415]: +
+              - generic [ref=e416]: Write
+              - code [ref=e417]: /Users/gyasisutton/Documents/code/open-design/.od/projects/atelier-hub-dashboard/mini-hud-card.html
+              - generic [ref=e418]: 324 lines
+              - generic [ref=e419]: done
+              - button "open" [ref=e420] [cursor=pointer]
+            - paragraph [ref=e422]:
+              - text: "The card's built. Quick self-check against your spec: 420×320 fixed card,"
+              - code [ref=e423]: rgba(14,14,14,0.92)
+              - text: + 14px backdrop-blur, 1px gold border, scrollbars suppressed — all present. Let me verify it renders cleanly.
+            - generic [ref=e424]:
+              - generic [ref=e425]:
+                - generic [ref=e426]: $
+                - generic [ref=e427]: Bash
+                - generic [ref=e428]: Sanity-check canvas/id wiring
+                - generic [ref=e429]: done
+                - button "output" [ref=e430] [cursor=pointer]
+              - generic [ref=e431]: node -e "const h=require('fs').readFileSync('mini-hud-card.html','utf8'); const o=(h.match(/<canvas/g)||[]).length, c=(h.match(/getElementById\('(pieChart|tpsChart)'\)/g)||[]).length; console.log('canvases:',o,'chart targets:',c); ['memPill','pieChart','tpsChart','updated'].forEach(id=>console.log(id, h.includes('id=\"'+id+'\"')?'ok':'MISSING'));"
+            - generic [ref=e432]:
+              - paragraph [ref=e433]: "All wired and rendering. Here's what landed:"
+              - list [ref=e434]:
+                - listitem [ref=e435]:
+                  - strong [ref=e436]: Top bar
+                  - text: — memory pill
+                  - code [ref=e437]: 38.4 / 55GB
+                  - text: whose dot + value recolor by pressure (green < 60%, amber < 85%, cliff-red above; 38.4/55 ≈ 70% lands amber) ·
+                  - code [ref=e438]: 5 tenants
+                  - text: ·
+                  - code [ref=e439]: 4 active jobs
+                  - text: ", all on one tight mono line."
+                - listitem [ref=e440]:
+                  - strong [ref=e441]: Scene Info
+                  - text: — 90px doughnut of loaded GB with a
+                  - code [ref=e442]: 54 GB loaded
+                  - text: center readout (omnivoice/kokoro/comfyui/qwen3/free, same gold palette as the full dashboard) on the left; the 3 busiest sidecars on the right as
+                  - code [ref=e443]: state dot · name · mem · jobs
+                  - text: rows, with busy dots pulsing.
+                - listitem [ref=e444]:
+                  - strong [ref=e445]: Bottom
+                  - text: — 40px full-width tokens/sec sparkline (last 10 req) with a dashed warn line at 30 t/s and a live
+                  - code [ref=e446]: 47 t/s
+                  - text: readout.
+                - listitem [ref=e447]:
+                  - strong [ref=e448]: LIVE
+                  - text: — pulsing green dot bottom-right with a ticking
+                  - code [ref=e449]: updated Ns ago
+                  - text: timestamp.
+              - paragraph [ref=e450]:
+                - text: It's centered on a dark backdrop for preview; to drop it into a real screen, swap the one commented line in
+                - code [ref=e451]: .hud-card
+                - text: to
+                - code [ref=e452]: "position: fixed; bottom: 20px; right: 20px;"
+                - text: .
+            - generic [ref=e453]:
+              - generic [ref=e454]: Files from this turn
+              - generic [ref=e456]:
+                - img [ref=e458]
+                - generic "mini-hud-card.html" [ref=e463]
+                - generic [ref=e464]: 10.9 KB
+                - generic [ref=e465]:
+                  - button "Open" [ref=e466] [cursor=pointer]
+                  - link "Download" [ref=e467] [cursor=pointer]:
+                    - /url: /api/projects/atelier-hub-dashboard/raw/mini-hud-card.html
+            - generic [ref=e375]:
+              - generic [ref=e377]: Done
+              - generic [ref=e378]: 2m 06s · 12911 out · $0.7664
+        - generic [ref=e492]:
+          - generic [ref=e493]: You
+          - generic [ref=e494]: "Add one more section between the Scene Info and the sparkline: a compact chat-style feed showing the last 3 active invocations. Each row is a single line: a small colored mode dot on the left (gold = tts, blue = llm/chat, purple = img, grey = embed), then the truncated current prompt/message in a pale muted body text (max ~38 chars, ellipsis), then a tiny elapsed time right-aligned (e.g. \"1.8s\"). Style it like a minimal messenger — no borders between rows, just tight line spacing, monospace. The most recent invocation at the top. Keep everything else on the card exactly as-is."
+        - generic [ref=e495]:
+          - generic [ref=e496]: Claude
+          - generic [ref=e497]:
+            - generic [ref=e507]:
+              - generic [ref=e508]: initializing
+              - generic [ref=e509]: claude-opus-4-8[1m]
+            - button "Thinking" [ref=e511] [cursor=pointer]:
+              - img [ref=e513]
+              - generic [ref=e515]: Thinking
+              - img [ref=e517]
+            - paragraph [ref=e520]: I'll add the invocation feed between Scene Info and the sparkline. Let me read the current file first.
+            - generic [ref=e522]:
+              - generic [ref=e523]: ↗
+              - generic [ref=e524]: Read
+              - code [ref=e525]: /Users/gyasisutton/Documents/code/open-design/.od/projects/atelier-hub-dashboard/mini-hud-card.html
+              - generic [ref=e526]: done
+              - button "open" [ref=e527] [cursor=pointer]
+            - button "Thinking" [ref=e529] [cursor=pointer]:
+              - img [ref=e531]
+              - generic [ref=e533]: Thinking
+              - img [ref=e535]
+            - paragraph [ref=e538]: "This is a focused tweak — I'll insert the invocation feed between Scene Info and the sparkline, keeping everything else identical. First the styles:"
+            - generic [ref=e540]:
+              - generic [ref=e541]: ✎
+              - generic [ref=e542]: Edit
+              - code [ref=e543]: /Users/gyasisutton/Documents/code/open-design/.od/projects/atelier-hub-dashboard/mini-hud-card.html
+              - generic [ref=e544]: 1 change
+              - generic [ref=e545]: done
+              - button "open" [ref=e546] [cursor=pointer]
+            - paragraph [ref=e548]: "Now the markup — inserting the feed between Scene Info and the sparkline:"
+            - generic [ref=e550]:
+              - generic [ref=e551]: ✎
+              - generic [ref=e552]: Edit
+              - code [ref=e553]: /Users/gyasisutton/Documents/code/open-design/.od/projects/atelier-hub-dashboard/mini-hud-card.html
+              - generic [ref=e554]: 1 change
+              - generic [ref=e555]: done
+              - button "open" [ref=e556] [cursor=pointer]
+            - generic [ref=e501]:
+              - generic [ref=e503]: Working
+              - generic [ref=e504]: 45s
+      - generic [ref=e269]:
+        - generic [ref=e270]:
+          - textbox "Describe the design you want — paste or drop images, or @ a file…" [active] [ref=e272]
+          - generic [ref=e273]:
+            - button "Open CLI and model settings" [ref=e274] [cursor=pointer]:
+              - img [ref=e275]
+            - button "Attach files" [ref=e276] [cursor=pointer]:
+              - img [ref=e277]
+            - button "Import" [ref=e281] [cursor=pointer]:
+              - img [ref=e282]
+              - generic [ref=e285]: Import
+              - img [ref=e286]
+            - button "Stop" [ref=e505] [cursor=pointer]:
+              - img [ref=e289]
+              - generic [ref=e292]: Stop
+        - generic [ref=e293]: ⌘/Ctrl + Enter to send · paste images · @ to reference files
+    - generic [ref=e294]:
+      - tablist "Design Files" [ref=e295]:
+        - tab "Design Files" [ref=e296] [cursor=pointer]:
+          - img [ref=e298]
+          - generic [ref=e303]: Design Files
+        - tab "atelier-hub-dashboard.html" [ref=e304] [cursor=pointer]:
+          - img [ref=e306]
+          - generic [ref=e311]: atelier-hub-dashboard.html
+          - button "Close tab" [ref=e312]:
+            - img [ref=e313]
+        - tab "mini-hud-card.html" [selected] [ref=e471] [cursor=pointer]:
+          - img [ref=e473]
+          - generic [ref=e478]: mini-hud-card.html
+          - button "Close tab" [ref=e479]:
+            - img [ref=e480]
+      - generic [ref=e317]:
+        - generic [ref=e318]:
+          - generic [ref=e319]:
+            - button "Reload" [ref=e320] [cursor=pointer]:
+              - img [ref=e321]
+            - button "Tweaks Coming soon" [disabled] [ref=e324]:
+              - img [ref=e325]
+              - generic [ref=e329]: Tweaks
+              - text: Coming soon
+          - generic [ref=e331]:
+            - generic [ref=e332]:
+              - button "Preview" [ref=e333] [cursor=pointer]
+              - button "Source" [ref=e334] [cursor=pointer]
+            - button "Comment Coming soon" [disabled] [ref=e336]:
+              - img [ref=e337]
+              - generic [ref=e339]: Comment
+              - text: Coming soon
+            - button "Edit Coming soon" [disabled] [ref=e340]:
+              - img [ref=e341]
+              - generic [ref=e344]: Edit
+              - text: Coming soon
+            - button "Draw Coming soon" [disabled] [ref=e345]:
+              - img [ref=e346]
+              - generic [ref=e349]: Draw
+              - text: Coming soon
+            - button "Zoom out" [ref=e351] [cursor=pointer]:
+              - img [ref=e352]
+            - button "175%" [ref=e491] [cursor=pointer]:
+              - generic [ref=e354]: 175%
+            - button "Zoom in" [ref=e355] [cursor=pointer]:
+              - img [ref=e356]
+            - button "Share" [ref=e558] [cursor=pointer]:
+              - generic [ref=e559]: Share
+              - img [ref=e560]
+        - iframe [ref=e562]:
+          - generic [ref=f5e2]:
+            - generic [ref=f5e3]:
+              - generic [ref=f5e6]: 38.4 / 55GB
+              - generic [ref=f5e8]: 5tenants
+              - generic [ref=f5e10]: 4active jobs
+            - generic [ref=f5e11]:
+              - generic [ref=f5e12]:
+                - generic:
+                  - generic: "54"
+                  - generic: GB loaded
+              - generic [ref=f5e14]:
+                - generic [ref=f5e15]: Busiest sidecars
+                - generic [ref=f5e16]:
+                  - generic [ref=f5e18]: omnivoice
+                  - generic [ref=f5e19]: 18.0 GB
+                  - generic [ref=f5e20]: 3 jobs
+                - generic [ref=f5e21]:
+                  - generic [ref=f5e23]: comfyui
+                  - generic [ref=f5e24]: 12.0 GB
+                  - generic [ref=f5e25]: 1 job
+                - generic [ref=f5e26]:
+                  - generic [ref=f5e28]: qwen3:32b
+                  - generic [ref=f5e29]: 20.0 GB
+                  - generic [ref=f5e30]: 0 job
+            - generic [ref=f5e31]:
+              - generic [ref=f5e32]: Active invocations
+              - generic [ref=f5e33]:
+                - generic [ref=f5e35]: narrate ch.3 — "the lighthouse keeper waved at the…"
+                - generic [ref=f5e36]: 1.8s
+              - generic [ref=f5e37]:
+                - generic [ref=f5e39]: summarize Q3 earnings call transcript, flag risks…
+                - generic [ref=f5e40]: 4.2s
+              - generic [ref=f5e41]:
+                - generic [ref=f5e43]: cyberpunk alley, neon rain, volumetric fog, 4k
+                - generic [ref=f5e44]: 12s
+            - generic [ref=f5e46]:
+              - generic [ref=f5e47]: Tokens / sec · last 10 req
+              - generic [ref=f5e48]: 47 t/s
+            - generic [ref=f5e51]:
+              - generic [ref=f5e53]: LIVE
+              - generic [ref=f5e54]: updated 3s ago
