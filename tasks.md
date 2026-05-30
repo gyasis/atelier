@@ -70,39 +70,39 @@ description: "Atelier Native Dashboard — Tauri (Rust + HTML webview) — real-
 
 ## Wave 3 — Frontend Wiring (Live Data)
 
-- [ ] **T011** Update `dashboard/ui/index.html` — replace all mock `const memData = [...]` style static arrays with calls to `atelier-bridge.js`. On load: call `fetchPressure()` → populate memory chart + tenant cards + status pill. Call `fetchTelemetry()` → populate inference flow strip + rolling buffer. Call `fetchSidecars()` → merge with pressure tenants. Call `fetchPredictorStats()` → populate class stats bars. Set a `setInterval` at 2500ms to refresh all data. Wire `dashboard/ui/js/atelier-bridge.js`.
+- [x] **T011** Update `dashboard/ui/index.html` — replace all mock `const memData = [...]` style static arrays with calls to `atelier-bridge.js`. On load: call `fetchPressure()` → populate memory chart + tenant cards + status pill. Call `fetchTelemetry()` → populate inference flow strip + rolling buffer. Call `fetchSidecars()` → merge with pressure tenants. Call `fetchPredictorStats()` → populate class stats bars. Set a `setInterval` at 2500ms to refresh all data. Wire `dashboard/ui/js/atelier-bridge.js`.
 
-- [ ] **T012** [P] Update `dashboard/ui/hud.html` — same bridge wiring for the mini HUD card. `fetchPressure()` → top bar pill + pie chart data. `fetchSidecars()` → busiest 3 rows. `fetchTelemetry()` → invocation feed + tokens/sec sparkline. 2500ms poll. Update the `● LIVE · updated Ns ago` counter using `Date.now()`.
+- [x] **T012** [P] Update `dashboard/ui/hud.html` — same bridge wiring for the mini HUD card. `fetchPressure()` → top bar pill + pie chart data. `fetchSidecars()` → busiest 3 rows. `fetchTelemetry()` → invocation feed + tokens/sec sparkline. 2500ms poll. Update the `● LIVE · updated Ns ago` counter using `Date.now()`.
 
-- [ ] **T013** [P] Create `dashboard/ui/js/charts.js` — extract all Chart.js initialisation from `index.html` into a module (`initMemoryChart`, `initPieChart`, `initClassChart`, `initFlowCharts`). Each accepts a data object and returns the chart instance. `index.html` imports and calls these after each poll. Keeps the HTML clean.
+- [x] **T013** [P] Create `dashboard/ui/js/charts.js` — extract all Chart.js initialisation from `index.html` into a module (`initMemoryChart`, `initPieChart`, `initClassChart`, `initFlowCharts`). Each accepts a data object and returns the chart instance. `index.html` imports and calls these after each poll. Keeps the HTML clean.
 
 ---
 
 ## Wave 4 — Menu Bar + App Shell
 
-- [ ] **T014** Configure menu-bar tray in `dashboard/src-tauri/tauri.conf.json` — set `systemTray.iconPath` to `icons/tray-icon.png`, `systemTray.iconAsTemplate` true (macOS template icon). Window config: `decorations: false`, `transparent: true`, `alwaysOnTop: false`, initial size `1440x820`.
+- [x] **T014** Configure menu-bar tray in `dashboard/src-tauri/tauri.conf.json` — set `systemTray.iconPath` to `icons/tray-icon.png`, `systemTray.iconAsTemplate` true (macOS template icon). Window config: `decorations: false`, `transparent: true`, `alwaysOnTop: false`, initial size `1440x820`.
 
-- [ ] **T015** Create `dashboard/src-tauri/src/tray.rs` — build the tray menu:
+- [x] **T015** Create `dashboard/src-tauri/src/tray.rs` — build the tray menu:
   - Left-click on icon → show/hide the main window
   - Menu items: `Open Dashboard`, `Open Mini HUD`, separator, `Quit`
   - `Open Mini HUD` opens a second smaller window (`400x340`) loading `hud.html`
   Register in `lib.rs`.
 
-- [ ] **T016** [P] Create `dashboard/src-tauri/icons/tray-icon.png` — a 22×22 dark monochrome "A" lettermark (the Atelier logo) as a PNG. Use the macOS template icon convention (black on transparent). Script it with ImageMagick: `convert -size 22x22 xc:transparent -fill black -font Helvetica-Bold -pointsize 14 -gravity Center -annotate 0 "A" dashboard/src-tauri/icons/tray-icon.png`.
+- [x] **T016** [P] Create `dashboard/src-tauri/icons/tray-icon.png` — a 22×22 dark monochrome "A" lettermark (the Atelier logo) as a PNG. Use the macOS template icon convention (black on transparent). Script it with ImageMagick: `convert -size 22x22 xc:transparent -fill black -font Helvetica-Bold -pointsize 14 -gravity Center -annotate 0 "A" dashboard/src-tauri/icons/tray-icon.png`.
 
-- [ ] **T017** [P] Add a `Tauri::command` `get_pressure_summary() -> String` in `commands.rs` that returns a one-liner like `"38.4 GB · warn"` for tray tooltip. Wire it via a 5s polling JS call that updates `document.title` with the pressure summary so the tray tooltip stays current.
+- [x] **T017** [P] Add a `Tauri::command` `get_pressure_summary() -> String` in `commands.rs` that returns a one-liner like `"38.4 GB · warn"` for tray tooltip. Wire it via a 5s polling JS call that updates `document.title` with the pressure summary so the tray tooltip stays current.
 
 ---
 
 ## Wave 5 — Build + Package
 
-- [ ] **T018** Add `dashboard/ui/package.json` with a `build` script: `cp -r . dist` (static copy — no bundler needed since we have no npm deps beyond the vendored Chart.js). Verify `cargo tauri build` resolves `distDir` correctly.
+- [x] **T018** Add `dashboard/ui/package.json` with a `build` script: `cp -r . dist` (static copy — no bundler needed since we have no npm deps beyond the vendored Chart.js). Verify `cargo tauri build` resolves `distDir` correctly.
 
-- [ ] **T019** Run `cargo tauri build` from `dashboard/` — produces `dashboard/src-tauri/target/release/bundle/macos/AtelierDashboard.app`. Fix any compile errors. Record final binary size.
+- [x] **T019** Run `cargo tauri build` from `dashboard/` — produces `dashboard/src-tauri/target/release/bundle/macos/AtelierDashboard.app`. Fix any compile errors. Record final binary size.
 
-- [ ] **T020** [P] Create `dashboard/README.md` — build instructions (`rustup`, `cargo tauri dev` for dev, `cargo tauri build` for release), which governor endpoints it polls, how to install the `.app` (drag to `/Applications` or launch via Spotlight), Phase 1 scope.
+- [x] **T020** [P] Create `dashboard/README.md` — build instructions (`rustup`, `cargo tauri dev` for dev, `cargo tauri build` for release), which governor endpoints it polls, how to install the `.app` (drag to `/Applications` or launch via Spotlight), Phase 1 scope.
 
-- [ ] **T021** [P] Update root `README.md` — add `## Native Dashboard` section: what it is, Tauri stack, link to `dashboard/README.md`.
+- [x] **T021** [P] Update root `README.md` — add `## Native Dashboard` section: what it is, Tauri stack, link to `dashboard/README.md`.
 
 ---
 

@@ -372,8 +372,74 @@ new Chart(document.getElementById('tpsChart'), {
 });
 
 // ---- ticking "updated Ns ago" ----
-let secs = 2;
-setInterval(()=>{ secs++; document.getElementById('updated').textContent = 'updated ' + secs + 's ago'; }, 1000);
+let lastRefresh = Date.now();
+setInterval(()=>{
+  const s = Math.round((Date.now() - lastRefresh) / 1000);
+  const el = document.getElementById('updated');
+  if (el) el.textContent = 'updated ' + s + 's ago';
+}, 1000);
+
+// ---- Live Tauri bridge ----
+const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
+async function tauriGet(cmd) {
+  if (!isTauri) return null;
+  try { return await window.__TAURI__.invoke(cmd); } catch { return null; }
+}
+
+const pieInst = Chart.getChart('pieChart');
+const allCanvases = document.querySelectorAll('canvas');
+const tpsInst = allCanvases.length ? Chart.getChart(allCanvases[allCanvases.length-1]) : null;
+
+async function refreshHud() {
+  const [pressure, telemetry, logMetrics] = await Promise.all([
+    tauriGet('get_pressure'),
+    tauriGet('get_telemetry'),
+    tauriGet('get_log_metrics'),
+  ]);
+
+  if (pressure) {
+    const gb = pressure.resident_gb ?? 38.4;
+    const el = document.getElementById('memPill');
+    if (el) el.textContent = `${gb.toFixed(1)} / 55GB`;
+  }
+
+  if (pressure?.tenants && pieInst) {
+    const gb = pressure.tenants.map(t => t.mem_gb ?? 0);
+    const free = Math.max(0, 64 - gb.reduce((a,b)=>a+b,0));
+    pieInst.data.datasets[0].data = [...gb, free];
+    pieInst.update('none');
+  }
+
+  const tenants = pressure?.tenants ?? [];
+  const busiest = [...tenants].sort((a,b)=>(b.active_jobs||0)-(a.active_jobs||0)).slice(0,3);
+  const rowEls = document.querySelectorAll('.sc-row');
+  busiest.forEach((t,i)=>{
+    if (!rowEls[i]) return;
+    const dot = rowEls[i].querySelector('.sdot');
+    if (dot) dot.className = `sdot ${t.state==='busy'?'busy':t.state==='idle'?'up':'cold'}`;
+  });
+
+  const calls = [...(telemetry?.recent_synths??[]).map(s=>({kind:'tts',msg:`synth·${s.engine}`,dur:s.seconds?.toFixed(1)+'s',ts:s.ts})),
+                 ...(telemetry?.recent_calls??[]).map(c=>({kind:'llm',msg:c.engine,dur:c.latency_s?.toFixed(1)+'s',ts:c.ts}))
+                ].sort((a,b)=>b.ts-a.ts).slice(0,3);
+  const dotColor = {tts:'#C8A96E',llm:'#5B8FE8',img:'#9B6EC8'};
+  const feedEl = document.getElementById('invocations');
+  if (feedEl && calls.length) {
+    feedEl.innerHTML = calls.map(c=>`
+      <div class="inv-row">
+        <span class="mode-dot" style="background:${dotColor[c.kind]??'#9A958A'}"></span>
+        <span class="inv-msg">${c.msg.slice(0,38)}${c.msg.length>38?'…':''}</span>
+        <span class="inv-dur">${c.dur}</span>
+      </div>`).join('');
+  }
+
+  const tpsLog = (logMetrics??[]).filter(m=>m.source==='ollama'&&m.metric==='tokens_per_sec').slice(-10).map(m=>m.value);
+  if (tpsLog.length && tpsInst) { tpsInst.data.datasets[0].data = tpsLog; tpsInst.update('none'); }
+
+  lastRefresh = Date.now();
+}
+
+if (isTauri) { refreshHud(); setInterval(refreshHud, 2500); }
 </script>
 </body>
 </html>

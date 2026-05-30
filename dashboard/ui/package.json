@@ -1,0 +1,7 @@
+{
+  "name": "atelier-dashboard-ui",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "mkdir -p dist && cp -r index.html hud.html vendor js dist/"
+  }
+}

@@ -591,6 +591,101 @@ const tasks = [
 document.getElementById('taskRows').innerHTML = tasks.map(([n,s,d,st])=>
   `<tr><td>${n}</td><td class="muted">${s}</td><td>${d}</td><td><span class="pill ${st}">${st}</span></td></tr>`
 ).join('');
+
+// ---- Live data bridge (Tauri invoke or mock fallback) ----
+const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
+async function tauriGet(cmd) {
+  if (!isTauri) return null;
+  try { return await window.__TAURI__.invoke(cmd); } catch { return null; }
+}
+
+// Chart instances for live updates
+const memChart = Chart.getChart('memChart');
+const pieChart = Chart.getChart('pieChart');
+const ttftChartInst = Chart.getChart('ttftChart');
+const tpsChartInst  = Chart.getChart('tpsChart');
+
+const memRing = [...memData]; // rolling 60-sample buffer
+
+async function refreshAll() {
+  const [pressure, telemetry, sidecars, stats, logMetrics] = await Promise.all([
+    tauriGet('get_pressure'),
+    tauriGet('get_telemetry'),
+    tauriGet('get_sidecars'),
+    tauriGet('get_predictor_stats'),
+    tauriGet('get_log_metrics'),
+  ]);
+
+  // -- Memory chart --
+  if (pressure) {
+    const gb = pressure.resident_gb ?? 38.4;
+    memRing.push(+gb.toFixed(1));
+    if (memRing.length > 60) memRing.shift();
+    if (memChart) { memChart.data.datasets[0].data = [...memRing]; memChart.update('none'); }
+    // Big readout
+    const nr = document.querySelector('.big-readout .n');
+    if (nr) nr.textContent = gb.toFixed(1);
+    // Title colour from pressure level
+    document.title = `${gb.toFixed(1)} GB · ${pressure.level ?? ''}`;
+  }
+
+  // -- Tenant cards: update state dots + job counts --
+  if (pressure?.tenants) {
+    pressure.tenants.forEach(t => {
+      const cards = document.querySelectorAll('.tcard');
+      cards.forEach(card => {
+        if (card.querySelector('.name')?.textContent.includes(t.name)) {
+          const dot = card.querySelector('.sdot');
+          if (dot) { dot.className = `sdot ${t.state === 'busy' ? 'busy' : t.state === 'idle' ? 'up' : 'cold'}`; }
+          const vals = card.querySelectorAll('.metric .v');
+          if (vals[0]) vals[0].textContent = t.active_jobs;
+          if (vals[1]) vals[1].textContent = t.queue_depth;
+          if (vals[2]) vals[2].textContent = t.mem_gb?.toFixed(1);
+          card.className = `tcard${t.state === 'busy' ? ' busy' : ''}`;
+        }
+      });
+    });
+  }
+
+  // -- Pie chart --
+  if (pressure?.tenants && pieChart) {
+    const sliceGb = pressure.tenants.map(t => t.mem_gb ?? 0);
+    const total = sliceGb.reduce((a, b) => a + b, 0);
+    const free  = Math.max(0, 64 - total);
+    pieChart.data.datasets[0].data = [...sliceGb, free];
+    pieChart.update('none');
+  }
+
+  // -- TTFT / tps line charts (prefer log metrics, fallback to telemetry) --
+  const tpsFromLog = (logMetrics ?? []).filter(m => m.source === 'ollama' && m.metric === 'tokens_per_sec').slice(-10).map(m => m.value);
+  if (tpsFromLog.length && tpsChartInst) {
+    tpsChartInst.data.datasets[0].data = tpsFromLog;
+    tpsChartInst.update('none');
+  } else if (telemetry?.recent_calls?.length && tpsChartInst) {
+    const rates = telemetry.recent_calls.slice(-10).map(c => c.output_tokens / Math.max(c.latency_s, 0.1));
+    tpsChartInst.data.datasets[0].data = rates;
+    tpsChartInst.update('none');
+  }
+
+  // -- Task table from telemetry --
+  if (telemetry?.recent_calls?.length) {
+    const rows = [...(telemetry.recent_synths ?? []).map(s => ({
+      name: `tts.synth · ${s.engine}`, ts: s.ts, dur: `${s.seconds?.toFixed(1)}s`, st: 'done'
+    })), ...(telemetry.recent_calls ?? []).map(c => ({
+      name: `chat.${c.engine}`, ts: c.ts, dur: `${c.latency_s?.toFixed(1)}s`, st: 'done'
+    }))].sort((a, b) => b.ts - a.ts).slice(0, 11);
+    const tbody = document.getElementById('taskRows');
+    if (tbody) tbody.innerHTML = rows.map(r =>
+      `<tr><td>${r.name}</td><td class="muted">${new Date(r.ts).toTimeString().slice(0,8)}</td><td>${r.dur}</td><td><span class="pill done">done</span></td></tr>`
+    ).join('');
+  }
+}
+
+// Start live polling if in Tauri
+if (isTauri) {
+  refreshAll();
+  setInterval(refreshAll, 2500);
+}
 </script>
 </body>
 </html>
