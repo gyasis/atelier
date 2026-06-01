@@ -5,7 +5,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Atelier Hub — Mini HUD</title>
-<script src="../vendor/chart.umd.min.js"></script>
+<script src="vendor/chart.umd.min.js"></script>
 <style>
   :root {
     --gold: #C8A96E;
@@ -380,66 +380,164 @@ setInterval(()=>{
 }, 1000);
 
 // ---- Live Tauri bridge ----
-const isTauri = typeof window !== 'undefined' && typeof window.__TAURI__ !== 'undefined';
 async function tauriGet(cmd) {
-  if (!isTauri) return null;
-  try { return await window.__TAURI__.invoke(cmd); } catch { return null; }
+  try {
+    if (typeof window.__TAURI__?.core?.invoke === 'function')
+      return await window.__TAURI__.core.invoke(cmd);
+    if (typeof window.__TAURI_INTERNALS__?.invoke === 'function')
+      return await window.__TAURI_INTERNALS__.invoke(cmd);
+  } catch(e) {}
+  return null;
 }
+
+// ---- Accept data pushed from parent dashboard (no double-poll) ----
+let _parentData = null;
+window.addEventListener('message', e => {
+  if (e.data?.type === 'atelier-data') {
+    _parentData = e.data;
+    applyHudData(e.data.pressure, e.data.telemetry, e.data.sidecars, e.data.logMetrics);
+  }
+});
 
 const pieInst = Chart.getChart('pieChart');
 const allCanvases = document.querySelectorAll('canvas');
 const tpsInst = allCanvases.length ? Chart.getChart(allCanvases[allCanvases.length-1]) : null;
 
-async function refreshHud() {
-  const [pressure, telemetry, logMetrics] = await Promise.all([
-    tauriGet('get_pressure'),
-    tauriGet('get_telemetry'),
-    tauriGet('get_log_metrics'),
-  ]);
+const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, comfyui: 12.0 };
+const dotColor = { tts: '#C8A96E', llm: '#6E86C8', img: '#9B6EC8', embed: '#63605A' };
 
+function applyHudData(pressure, telemetry, sidecars, logMetrics) {
+  // -- Memory pill --
   if (pressure) {
-    const gb = pressure.resident_gb ?? 38.4;
+    const gb = pressure.resident_gb ?? 0;
     const el = document.getElementById('memPill');
-    if (el) el.textContent = `${gb.toFixed(1)} / 55GB`;
+    if (el) {
+      const level = pressure.level ?? 'ok';
+      const color = level === 'critical' ? 'var(--cliff)' : level === 'warn' ? 'var(--warn)' : 'var(--up)';
+      el.style.borderColor = color;
+      el.querySelector('.pdot').style.background = color;
+      el.querySelector('.pv').textContent = gb.toFixed(1);
+    }
+    // tenant / jobs counts in top bar
+    const tc = document.querySelector('.stat[data-k="tenants"] b');
+    const jc = document.querySelector('.stat[data-k="jobs"] b');
+    const loaded = (pressure.tenants??[]).filter(t=>t.state!=='cold').length;
+    const jobs = (pressure.tenants??[]).reduce((a,t)=>a+(t.active_jobs??0),0);
+    if (tc) tc.textContent = loaded;
+    if (jc) jc.textContent = jobs;
   }
 
-  if (pressure?.tenants && pieInst) {
-    const gb = pressure.tenants.map(t => t.mem_gb ?? 0);
+  // -- Build enriched tenant list with mem_gb --
+  const govTenants = pressure?.tenants ?? [];
+  const enriched = govTenants.map(t => ({
+    ...t,
+    mem_gb: t.mem_gb ?? (t.state !== 'cold' ? (SIDECAR_MEM[t.name] ?? 0) : 0),
+  }));
+  const ollamaModels = sidecars?.ollama?.models ?? [];
+  if (ollamaModels.length > 0) {
+    ollamaModels.forEach(m => enriched.push({
+      name: m.name ?? 'ollama', state: 'busy',
+      mem_gb: m.size ? +(m.size/1e9).toFixed(1) : 0,
+    }));
+  } else {
+    enriched.push({ name: 'ollama', state: 'cold', mem_gb: 0 });
+  }
+
+  // -- Pie chart --
+  const loaded = enriched.filter(t => t.mem_gb > 0);
+  if (pieInst && loaded.length) {
+    const gb = loaded.map(t => t.mem_gb);
     const free = Math.max(0, 64 - gb.reduce((a,b)=>a+b,0));
     pieInst.data.datasets[0].data = [...gb, free];
+    pieInst.data.labels = [...loaded.map(t=>t.name), 'free'];
     pieInst.update('none');
+    // update center text
+    const cen = document.querySelector('.pie-center .pn');
+    if (cen) cen.textContent = gb.reduce((a,b)=>a+b,0).toFixed(0);
   }
 
-  const tenants = pressure?.tenants ?? [];
-  const busiest = [...tenants].sort((a,b)=>(b.active_jobs||0)-(a.active_jobs||0)).slice(0,3);
+  // -- Sidecar rows (busiest 3) --
+  const busiest = [...enriched].sort((a,b)=>(b.active_jobs||0)-(a.active_jobs||0)).slice(0,3);
   const rowEls = document.querySelectorAll('.sc-row');
-  busiest.forEach((t,i)=>{
+  busiest.forEach((t,i) => {
     if (!rowEls[i]) return;
     const dot = rowEls[i].querySelector('.sdot');
-    if (dot) dot.className = `sdot ${t.state==='busy'?'busy':t.state==='idle'?'up':'cold'}`;
+    const nm = rowEls[i].querySelector('.name');
+    const mem = rowEls[i].querySelector('.mem');
+    const jobs = rowEls[i].querySelector('.jobs');
+    const dc = t.state==='busy'?'busy':t.state==='idle'||t.state==='warm'?'up':'cold';
+    if (dot) dot.className = `sdot ${dc}`;
+    if (nm) nm.textContent = t.name;
+    if (mem) mem.textContent = (t.mem_gb??0).toFixed(1)+' GB';
+    if (jobs) jobs.innerHTML = `${t.active_jobs??0}<span class="jl"> jobs</span>`;
   });
 
-  const calls = [...(telemetry?.recent_synths??[]).map(s=>({kind:'tts',msg:`synth·${s.engine}`,dur:s.seconds?.toFixed(1)+'s',ts:s.ts})),
-                 ...(telemetry?.recent_calls??[]).map(c=>({kind:'llm',msg:c.engine,dur:c.latency_s?.toFixed(1)+'s',ts:c.ts}))
-                ].sort((a,b)=>b.ts-a.ts).slice(0,3);
-  const dotColor = {tts:'#C8A96E',llm:'#5B8FE8',img:'#9B6EC8'};
+  // -- Invocation feed: model_call log metrics + synths --
+  const modelCalls = (logMetrics ?? []).filter(m => m.source==='ollama' && m.metric==='model_call')
+    .slice(-5).map(c => ({
+      kind: 'llm',
+      msg: `${c.label ?? 'ollama'} · ${c.path ?? '/api/chat'}`,
+      dur: c.value > 60000 ? (c.value/60000).toFixed(1)+'m' : c.value > 1000 ? (c.value/1000).toFixed(1)+'s' : Math.round(c.value)+'ms',
+      ts: c.ts ?? 0,
+    }));
+  const synths = (telemetry?.recent_synths ?? []).map(s => ({
+    kind: 'tts',
+    msg: `${s.engine} · ${s.chars ?? 0} chars`,
+    dur: s.seconds ? s.seconds.toFixed(1)+'s' : '—',
+    ts: (s.ts ?? 0) * 1000,
+  }));
+  const allCalls = [...modelCalls, ...synths].sort((a,b)=>b.ts-a.ts).slice(0,3);
   const feedEl = document.getElementById('invocations');
-  if (feedEl && calls.length) {
-    feedEl.innerHTML = calls.map(c=>`
-      <div class="inv-row">
-        <span class="mode-dot" style="background:${dotColor[c.kind]??'#9A958A'}"></span>
-        <span class="inv-msg">${c.msg.slice(0,38)}${c.msg.length>38?'…':''}</span>
-        <span class="inv-dur">${c.dur}</span>
-      </div>`).join('');
+  if (feedEl) {
+    if (allCalls.length) {
+      feedEl.innerHTML = allCalls.map(c => `
+        <div class="fd-row">
+          <span class="mdot ${c.kind}" style="background:${dotColor[c.kind]??'#9A958A'}"></span>
+          <span class="msg">${c.msg.slice(0,40)}${c.msg.length>40?'…':''}</span>
+          <span class="el">${c.dur}</span>
+        </div>`).join('');
+    } else {
+      feedEl.innerHTML = '<div class="fd-row" style="color:var(--text-3)"><span class="mdot"></span><span class="msg">no recent calls</span></div>';
+    }
   }
 
+  // -- tps sparkline from log metrics --
   const tpsLog = (logMetrics??[]).filter(m=>m.source==='ollama'&&m.metric==='tokens_per_sec').slice(-10).map(m=>m.value);
   if (tpsLog.length && tpsInst) { tpsInst.data.datasets[0].data = tpsLog; tpsInst.update('none'); }
 
   lastRefresh = Date.now();
 }
 
-if (isTauri) { refreshHud(); setInterval(refreshHud, 2500); }
+async function refreshHud() {
+  const [pressure, telemetry, sidecars, logMetrics] = await Promise.all([
+    tauriGet('get_pressure'),
+    tauriGet('get_telemetry'),
+    tauriGet('get_sidecars'),
+    tauriGet('get_log_metrics'),
+  ]);
+  applyHudData(pressure, telemetry, sidecars, logMetrics);
+}
+
+refreshHud(); setInterval(refreshHud, 2500);
+
+// ---- Back to full dashboard ----
+const backBtn = document.createElement('button');
+backBtn.textContent = '↗ Full View';
+backBtn.style.cssText = `
+  position:fixed; top:10px; right:10px; z-index:999;
+  background:rgba(14,14,14,0.9); color:#C8A96E;
+  border:1px solid rgba(200,169,110,0.35); padding:4px 10px;
+  font-family:"SF Mono",monospace; font-size:9px; letter-spacing:0.1em;
+  cursor:pointer; text-transform:uppercase;
+`;
+document.body.appendChild(backBtn);
+backBtn.addEventListener('click', async () => {
+  try {
+    const inv = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke;
+    if (inv) await inv('resize_to_main');
+  } catch {}
+  window.location.href = 'index.html';
+});
 </script>
 </body>
 </html>

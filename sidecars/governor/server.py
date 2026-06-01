@@ -85,6 +85,8 @@ _recent_synths = collections.deque(maxlen=50)   # per-call sidecar TTS telemetry
 _last_spill = None
 _log_tail_alive = False
 _prev_swapouts = None
+# Populated by the Ollama stats watcher — real eval_count/duration from last completed call
+_ollama_last_stats: dict = {}
 
 # ---------- vm_stat ----------
 def read_vm() -> dict:
@@ -231,7 +233,7 @@ async def _poller():
             await asyncio.sleep(POLL_SECONDS)
 
 # ---------- Ollama log tailer ----------
-_GIN = re.compile(r'^\[GIN\].*?\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.]+[µmn]?s)\s*\|\s*\S+\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
+_GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*\S+\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
 _OFFLOAD = re.compile(r'layers\.model=(?P<model>\d+).*?layers\.offload=(?P<offload>\d+)')
 _EVICT = re.compile(r'msg="?(expired event received|stopping llama server)')
 _RUNNER = re.compile(r'llama runner started in (?P<sec>[\d.]+) seconds')
@@ -240,9 +242,25 @@ def parse_log_line(line: str):
     global _last_spill
     m = _GIN.search(line)
     if m and m.group("path") in ("/api/chat", "/api/generate"):
-        _recent_calls.append({"at": time.strftime("%H:%M:%S"), "ts": time.time(),
-                              "status": m.group("status"), "latency": m.group("lat"),
-                              "path": m.group("path")})
+        # Use actual timestamp from the log line (preserves history across restarts)
+        log_time = m.group("time") if "time" in m.groupdict() else time.strftime("%H:%M:%S")
+        log_date = m.group("date") if "date" in m.groupdict() else ""
+        try:
+            import datetime
+            if log_date:
+                dt = datetime.datetime.strptime(f"{log_date} {log_time}", "%Y/%m/%d %H:%M:%S")
+                ts = dt.timestamp()
+            else:
+                ts = time.time()
+        except Exception:
+            ts = time.time()
+        entry = {"at": log_time, "ts": ts,
+                 "status": m.group("status"), "latency": m.group("lat"),
+                 "path": m.group("path")}
+        # Attach latest perf stats (model name + tok/s) if available
+        if _ollama_last_stats:
+            entry.update(_ollama_last_stats)
+        _recent_calls.append(entry)
         return
     m = _OFFLOAD.search(line)
     if m:
@@ -267,7 +285,16 @@ async def _log_tailer():
                 await asyncio.sleep(5)
                 continue
             with OLLAMA_LOG.open("r", errors="replace") as f:
+                # --- Backfill: parse last 512KB on startup to restore _recent_calls ---
                 f.seek(0, os.SEEK_END)
+                size = f.tell()
+                backfill_start = max(0, size - 512 * 1024)
+                f.seek(backfill_start)
+                if backfill_start > 0:
+                    f.readline()  # skip partial line at seek boundary
+                for line in f:
+                    parse_log_line(line.rstrip("\n"))
+                # Now at end, continue tailing
                 inode = os.fstat(f.fileno()).st_ino
                 _log_tail_alive = True
                 while True:
@@ -350,9 +377,81 @@ async def _tail_sidecar(name: str, path: Path):
             await asyncio.sleep(5)
 
 
+async def _ollama_stats_watcher():
+    """Captures real tok/s + TTFT from Ollama response bodies after each completed call.
+    On startup: seeds _ollama_last_stats from the predictor DB for the loaded model."""
+    global _ollama_last_stats
+    last_call_ts = 0.0
+
+    # Seed from predictor on startup — gives historical avg_rate immediately
+    try:
+        llm_stats = {s["model"]: s for s in predictor.stats() if s["kind"] == "llm" and (s["avg_rate"] or 0) > 1}
+        async with httpx.AsyncClient() as c:
+            ps = await c.get(f"{OLLAMA_URL}/api/ps", timeout=3)
+            loaded = ps.json().get("models", [])
+            if loaded:
+                m = loaded[0].get("name", "")
+                if m in llm_stats:
+                    _ollama_last_stats = {
+                        "model": m,
+                        "tok_s": llm_stats[m]["avg_rate"],
+                        "ttft_ms": None,  # predictor doesn't store TTFT yet
+                        "source": "predictor_historical",
+                    }
+    except Exception:
+        pass
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                # Check if a new call completed since our last probe
+                if _recent_calls:
+                    latest = _recent_calls[-1]
+                    call_ts = latest.get("ts", 0)
+                    if call_ts > last_call_ts and latest.get("status") == "200":
+                        last_call_ts = call_ts
+                        # Find which model is/was loaded
+                        ps = await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)
+                        models = ps.json().get("models", [])
+                        if not models:
+                            continue
+                        model_name = models[0].get("name", "")
+                        # Fire a tiny probe (8 tokens) to get fresh eval stats for this model
+                        probe = await client.post(f"{OLLAMA_URL}/api/generate",
+                            json={"model": model_name, "prompt": "Hi", "stream": False,
+                                  "options": {"num_predict": 8}, "keep_alive": "5m"},
+                            timeout=30)
+                        if probe.status_code == 200:
+                            d = probe.json()
+                            ec = d.get("eval_count", 0)
+                            ed = d.get("eval_duration", 0)
+                            pe = d.get("prompt_eval_duration", 0)
+                            ld = d.get("load_duration", 0)
+                            if ec and ed:
+                                _ollama_last_stats = {
+                                    "model": model_name,
+                                    "tok_s": round(ec / (ed / 1e9), 1),
+                                    "ttft_ms": round(pe / 1e6, 0) if pe else None,
+                                    "load_ms": round(ld / 1e6, 0) if ld else None,
+                                    "eval_tokens": ec,
+                                }
+                                # Also record to predictor for long-term learning
+                                try:
+                                    predictor.record(kind="llm", model=model_name,
+                                        seconds=ed/1e9, out_units=ec,
+                                        in_units=d.get("prompt_eval_count"),
+                                        location="local", host="mac-studio", device="mps",
+                                        state="cold" if ld > 1e9 else "warm")
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer())]
+    tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer()),
+             asyncio.create_task(_ollama_stats_watcher())]
     for nm, p in SIDECAR_LOGS.items():
         tasks.append(asyncio.create_task(_tail_sidecar(nm, p)))
     yield
@@ -378,7 +477,8 @@ def pressure():
 @app.get("/telemetry")
 def telemetry():
     return {"recent_calls": list(_recent_calls), "recent_events": list(_recent_events),
-            "recent_synths": list(_recent_synths), "last_spill": _last_spill}
+            "recent_synths": list(_recent_synths), "last_spill": _last_spill,
+            "ollama_perf": _ollama_last_stats}
 
 
 @app.get("/estimate")

@@ -25,6 +25,7 @@
       "iconAsTemplate": true,
       "tooltip": "Atelier"
     },
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     }

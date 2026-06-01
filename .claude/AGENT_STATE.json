@@ -1,12 +1,20 @@
 {
-  "session_id": "",
+  "session_id": "76f24e0a-981d-4110-9cb7-e2026dd5daf1",
   "user_id": "gyasisutton",
   "project_path": "/Users/gyasisutton/Documents/code/atelier",
-  "status": "initialized",
+  "status": "finalized",
   "agents": {
-    "main": {"status": "idle"},
-    "memory-keeper": {"status": "idle"},
-    "git-manager": {"status": "idle"}
+    "main": {
+      "status": "idle"
+    },
+    "memory-keeper": {
+      "status": "idle"
+    },
+    "git-manager": {
+      "status": "idle"
+    }
   },
-  "initialized_at": "2026-05-30T23:15:13+02:00"
+  "initialized_at": "2026-05-30T23:15:13+02:00",
+  "last_session_start": "2026-05-31T15:47:21.298456",
+  "last_session_end": "2026-06-01T09:04:41.619889"
 }

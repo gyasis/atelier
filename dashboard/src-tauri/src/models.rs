@@ -2,12 +2,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct TenantEntry {
+    #[serde(default)]
+    pub tenant: String,   // "ollama" | "atelier"
     pub name: String,
+    #[serde(default = "default_state")]
     pub state: String,
+    #[serde(default)]
     pub active_jobs: u32,
+    #[serde(default)]
     pub queue_depth: u32,
+    #[serde(default)]
     pub mem_gb: f64,
 }
+fn default_state() -> String { "unknown".into() }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct PressureResponse {
@@ -86,8 +93,14 @@ pub struct SidecarReadyz {
 /// Parsed log metric emitted by the log-tail watcher.
 #[derive(Debug, Serialize, Clone)]
 pub struct LogMetric {
-    pub source: String,   // "ollama" | "omnivoice" | "comfyui"
-    pub metric: String,   // "tokens_per_sec" | "synth_rtf" | "img_progress_pct"
+    pub source: String,          // "ollama" | "omnivoice" | "comfyui"
+    pub metric: String,          // "tokens_per_sec" | "synth_rtf" | "img_progress_pct" | "model_call"
     pub value: f64,
     pub ts: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,   // model name for model_call (e.g. "gemma4:latest")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,    // HTTP path for model_call (e.g. "/api/chat")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,     // HTTP status for model_call
 }

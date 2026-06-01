@@ -28,6 +28,10 @@ pub fn run() {
             commands::get_sidecars,
             commands::get_pressure_summary,
             commands::get_log_metrics,
+            commands::get_top_processes,
+            commands::resize_to_hud,
+            commands::resize_to_main,
+            commands::toggle_hud_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
