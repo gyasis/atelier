@@ -74,12 +74,18 @@ import mlx_whisper
 
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-large-v3-turbo")
 # Caller-selectable models — the request decides which one Atelier loads.
+# Aliases resolve to a LOCAL on-disk dir when WHISPER_{TURBO,LARGE}_PATH is set
+# (preferred — mlx-whisper then loads from disk with zero network). Falls back to
+# the HF repo name otherwise. Point these at ~/models/whisper/<dir> so nothing
+# ever re-downloads.
+_TURBO = os.environ.get("WHISPER_TURBO_PATH", "mlx-community/whisper-large-v3-turbo")
+_LARGE = os.environ.get("WHISPER_LARGE_PATH", "mlx-community/whisper-large-v3")
 MODEL_ALIASES = {
-    "turbo": "mlx-community/whisper-large-v3-turbo",
-    "large-turbo": "mlx-community/whisper-large-v3-turbo",
-    "large": "mlx-community/whisper-large-v3",
-    "large-v3": "mlx-community/whisper-large-v3",
-    "accurate": "mlx-community/whisper-large-v3",
+    "turbo": _TURBO,
+    "large-turbo": _TURBO,
+    "large": _LARGE,
+    "large-v3": _LARGE,
+    "accurate": _LARGE,
 }
 OUTPUT_DIR = Path(os.environ.get("WHISPER_OUTPUT_DIR", str(Path.home() / "outputs/transcripts")))
 MAX_PULL_BYTES = int(os.environ.get("WHISPER_MAX_PULL_MB", "512")) * 1024 * 1024
