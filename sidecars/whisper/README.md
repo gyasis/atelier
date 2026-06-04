@@ -73,6 +73,26 @@ Every response carries **`x-content-sha256`** (the cache key for that audio — 
 
 Optional form fields: `language` (ISO code, else auto-detect), `initial_prompt` (bias spelling/terms), `word_timestamps=true`.
 
+## Audio cleanup — normalize quiet/uneven recordings (ffmpeg)
+
+Optional leveling applied **before** transcription, for faint or uneven audio. Runs on the CPU (off the GPU lock); the cache key stays the sha256 of the *original* audio.
+
+| `normalize=` | filter | best for |
+|---|---|---|
+| `loudnorm` | EBU R128 (`I=-16:TP=-1.5:LRA=11`) | consistent broadcast loudness |
+| `dynaudnorm` | dynamic normalizer | lifting quiet passages, smoothing swings |
+| `speechnorm` | ffmpeg speech normalizer | speech-tuned leveling |
+| `speech` / `true` | `highpass=80, dynaudnorm, alimiter` | **default cleanup** — cut rumble → level → limit |
+
+Plus `gain_db=<N>` for a fixed boost (applied before normalize).
+
+```sh
+curl -s :8766/transcribe -F path=/path/faint.wav -F normalize=speech
+curl -s :8766/transcribe -F path=/path/faint.wav -F normalize=loudnorm -F gain_db=6
+```
+
+> Note: whisper internally normalizes its mel-spectrogram, so it's already robust to *pure* quietness — the real win is uneven levels, rumble, or one-loud-one-quiet speakers. Reach for this when a transcript comes back garbled on degraded audio.
+
 ## Post-processing — structure & summarize (LLM)
 
 Two optional methods layer the hub's local LLM (Ollama) on top of the raw transcript. **Opt-in** — they wake a ~20 GB model, so they only run when asked. The LLM call happens *after* the whisper model is done (semaphore released), so it never blocks other transcriptions, and it shows up in the governor's Ollama telemetry automatically.

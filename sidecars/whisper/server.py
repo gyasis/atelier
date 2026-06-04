@@ -61,6 +61,7 @@ import hashlib
 import json
 import os
 import secrets
+import subprocess
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -276,6 +277,52 @@ async def _resolve_source(
     if not p.is_file():
         raise HTTPException(400, f"path not found on host: {p}")
     return str(p), p.read_bytes(), False
+
+
+# ---------- audio pre-processing (ffmpeg leveling for quiet/uneven audio) ----------
+# Whisper does its own internal scaling, but genuinely quiet or wildly uneven
+# recordings still transcribe better after loudness leveling. These run via
+# ffmpeg BEFORE the model (CPU work, off the GPU lock). Opt-in per request.
+NORMALIZE_FILTERS = {
+    # EBU R128 broadcast loudness — consistent target level, great default.
+    "loudnorm": "loudnorm=I=-16:TP=-1.5:LRA=11",
+    # Dynamic normalizer — lifts quiet passages, smooths level swings.
+    "dynaudnorm": "dynaudnorm=f=150:g=15",
+    # ffmpeg's purpose-built speech leveler.
+    "speechnorm": "speechnorm=e=12.5:r=0.0001:l=1",
+    # Speech cleanup chain: cut low rumble -> dynamic-normalize -> peak-limit.
+    "speech": "highpass=f=80,dynaudnorm=f=150:g=15,alimiter=limit=0.95",
+}
+
+
+def _ffmpeg_preprocess(in_path: str, normalize: str | None, gain_db: float | None) -> tuple[str, bool]:
+    """Apply optional gain + a normalization filter via ffmpeg, writing a 16 kHz
+    mono wav (whisper's native input). Returns (path, is_temp). No-op (returns the
+    input untouched) when neither is requested."""
+    filters: list[str] = []
+    if gain_db:
+        filters.append(f"volume={gain_db}dB")
+    if normalize:
+        mode = "speech" if normalize.strip().lower() in ("true", "1", "yes", "auto") else normalize.strip().lower()
+        flt = NORMALIZE_FILTERS.get(mode)
+        if flt is None:
+            raise HTTPException(400, f"unknown normalize mode '{normalize}'; choose one of "
+                                     f"{sorted(NORMALIZE_FILTERS)} or true/auto")
+        filters.append(flt)
+    if not filters:
+        return in_path, False
+    fd, out = tempfile.mkstemp(prefix="whisper-norm-", suffix=".wav")
+    os.close(fd)
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-af", ",".join(filters),
+           "-ar", "16000", "-ac", "1", out]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+        raise HTTPException(500, f"ffmpeg preprocess failed: {proc.stderr.decode(errors='replace')[-300:]}")
+    return out, True
 
 
 # ---------- transcript formatting + output ----------
@@ -621,6 +668,8 @@ def agent(request: Request):
                  "response_format": "json | text | srt | vtt | verbose_json",
                  "save": "bool — also write to disk (sha256-named)",
                  "output_path": "explicit save destination",
+                 "normalize": "loudnorm|dynaudnorm|speechnorm|speech (or true) — ffmpeg-level quiet/uneven audio before ASR",
+                 "gain_db": "fixed dB boost (e.g. 6) applied before normalize",
                  "structure": "auto|interview|lecture|… → adds {detected_type, structured} (json only)",
                  "summarize": "0.0–1.0 → adds {summary, summary_weight} (json only)",
                  "llm_model": "override the Ollama model for structure/summarize",
@@ -664,6 +713,8 @@ def agent(request: Request):
              "do": "POST /transcribe/batch {path, summarize:0.6}; poll /jobs/{id}; read summary"},
             {"goal": "Interview turned into a clean Q&A doc",
              "do": "POST /transcribe with structure=interview (or structure=auto)"},
+            {"goal": "Quiet or uneven recording that transcribes poorly",
+             "do": "POST /transcribe with normalize=speech (or normalize=loudnorm); add gain_db=6 if very faint"},
         ],
         "instructions": (
             "1) Choose the input mode: upload (file), link (url), or local file (path) — exactly one.\n"
@@ -742,6 +793,8 @@ async def transcribe(
     response_format: str = Form(default="json"),
     save: bool = Form(default=False),
     output_path: str | None = Form(default=None),
+    normalize: str | None = Form(default=None),
+    gain_db: float | None = Form(default=None),
     structure: str | None = Form(default=None),
     summarize: float | None = Form(default=None),
     llm_model: str | None = Form(default=None),
@@ -752,6 +805,9 @@ async def transcribe(
     or a full HF repo); omitted = WHISPER_MODEL_REPO. The sidecar hot-swaps to it.
     Source — exactly one of: file (multipart upload), url (link to pull),
     path (file already on the Mac).
+    Audio prep (optional, ffmpeg; helps quiet/uneven recordings transcribe):
+      normalize=loudnorm|dynaudnorm|speechnorm|speech (or true→speech) → level it
+      gain_db=<float>  fixed boost in dB (e.g. 6) applied before normalize.
     Output — response body in response_format (json|text|srt|vtt|verbose_json);
     set save=true to also persist it under WHISPER_OUTPUT_DIR (or output_path).
     Post-process (optional, LLM via Ollama; requires json/verbose_json):
@@ -767,16 +823,24 @@ async def transcribe(
         raise HTTPException(400, "structure/summarize require response_format=json or verbose_json")
     repo = _resolve_model(model)
 
-    audio_path, raw, is_temp = await _resolve_source(file, url, path)
-    sha = hashlib.sha256(raw).hexdigest()
+    src_path, raw, is_temp = await _resolve_source(file, url, path)
+    sha = hashlib.sha256(raw).hexdigest()   # cache key = ORIGINAL audio (pre-normalize)
+    proc_path, is_proc = src_path, False
     try:
+        if normalize or gain_db:
+            proc_path, is_proc = await asyncio.to_thread(_ffmpeg_preprocess, src_path, normalize, gain_db)
         result, elapsed = await _run_transcription(
-            audio_path, repo, language, initial_prompt, word_timestamps, len(raw)
+            proc_path, repo, language, initial_prompt, word_timestamps, len(raw)
         )
     finally:
+        if is_proc and proc_path != src_path:
+            try:
+                os.unlink(proc_path)
+            except OSError:
+                pass
         if is_temp:
             try:
-                os.unlink(audio_path)
+                os.unlink(src_path)
             except OSError:
                 pass
 
@@ -807,6 +871,8 @@ class BatchReq(BaseModel):
     response_format: str = Field(default="json")
     save: bool = True
     output_path: str | None = None
+    normalize: str | None = None
+    gain_db: float | None = None
     structure: str | None = None
     summarize: float | None = None
     llm_model: str | None = None
@@ -821,17 +887,25 @@ async def _run_job(job_id: str, req: BatchReq) -> None:
     try:
         repo = _resolve_model(req.model)
         job["model"] = repo
-        audio_path, raw, is_temp = await _resolve_source(None, req.url, req.path)
+        src_path, raw, is_temp = await _resolve_source(None, req.url, req.path)
         sha = hashlib.sha256(raw).hexdigest()
         job["sha256"] = sha
+        proc_path, is_proc = src_path, False
         try:
+            if req.normalize or req.gain_db:
+                proc_path, is_proc = await asyncio.to_thread(_ffmpeg_preprocess, src_path, req.normalize, req.gain_db)
             result, elapsed = await _run_transcription(
-                audio_path, repo, req.language, req.initial_prompt, req.word_timestamps, len(raw)
+                proc_path, repo, req.language, req.initial_prompt, req.word_timestamps, len(raw)
             )
         finally:
+            if is_proc and proc_path != src_path:
+                try:
+                    os.unlink(proc_path)
+                except OSError:
+                    pass
             if is_temp:
                 try:
-                    os.unlink(audio_path)
+                    os.unlink(src_path)
                 except OSError:
                     pass
         fmt = req.response_format.lower()
