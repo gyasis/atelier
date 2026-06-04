@@ -73,6 +73,43 @@ Every response carries **`x-content-sha256`** (the cache key for that audio — 
 
 Optional form fields: `language` (ISO code, else auto-detect), `initial_prompt` (bias spelling/terms), `word_timestamps=true`.
 
+## Post-processing — structure & summarize (LLM)
+
+Two optional methods layer the hub's local LLM (Ollama) on top of the raw transcript. **Opt-in** — they wake a ~20 GB model, so they only run when asked. The LLM call happens *after* the whisper model is done (semaphore released), so it never blocks other transcriptions, and it shows up in the governor's Ollama telemetry automatically.
+
+The model is per-request selectable with `llm_model=`, defaulting to `$WHISPER_LLM_MODEL` (`qwen3:32b`).
+
+### `structure` — detect the kind of audio, then format it for that kind
+Uses cues (pauses between segments, question density) + the text to classify the recording as `interview` / `monologue` / `lecture` / `news_report` / `conversation`, then reformats accordingly (speaker turns, Q&A, sections) **without dropping content**.
+
+```sh
+# inline with a transcription (json output required)
+curl -s :8766/transcribe -F path=/path/a.wav -F structure=auto
+
+# or pass an explicit hint instead of auto-detect
+curl -s :8766/transcribe -F path=/path/a.wav -F structure=interview
+
+# standalone, on text you already have
+curl -s :8766/structure -H 'content-type: application/json' \
+  -d '{"text":"...transcript...","hint":"auto"}'
+```
+Adds to the response: `{"detected_type": "...", "structured": "...markdown..."}`.
+
+### `summarize` — strength 0.0 → 1.0
+A weight controls how hard to distill, tuned to keep substantive ideas and specifics (names/numbers) and drop filler:
+- **~0.0** light cleanup, near-verbatim
+- **~0.5** key points as bullets/short paragraphs (~half length)
+- **~1.0** tight executive summary, core ideas only
+
+```sh
+curl -s :8766/transcribe -F path=/path/a.wav -F summarize=0.8         # inline
+curl -s :8766/summarize -H 'content-type: application/json' \
+  -d '{"text":"...transcript...","weight":0.8}'                       # standalone
+```
+Adds to the response: `{"summary": "...markdown...", "summary_weight": 0.8}`.
+
+> Both can be combined in one call (`-F structure=auto -F summarize=0.6`). They require `response_format=json` (or `verbose_json`). The saved-to-disk artifact remains the pure transcript (the sha256 cache key); structure/summary come back in the response.
+
 ## Long audio — async batch
 
 For hour-long inputs, submit a job (source is `url` or `path`) and stream progress:
@@ -107,6 +144,9 @@ Like the other sidecars, the model **idle-unloads after 5 min** (`IDLE_UNLOAD_SE
 | `WHISPER_MODEL_REPO` | `mlx-community/whisper-large-v3-turbo` |
 | `WHISPER_OUTPUT_DIR` | `~/outputs/transcripts` |
 | `WHISPER_MAX_PULL_MB` | `512` (cap on url-pulled audio) |
+| `WHISPER_LLM_URL` | `http://127.0.0.1:11434` (Ollama, for structure/summarize) |
+| `WHISPER_LLM_MODEL` | `qwen3:32b` (default; per-request override via `llm_model=`) |
+| `WHISPER_LLM_TIMEOUT` | `300` |
 | `IDLE_UNLOAD_SECONDS` | `300` |
 | `KEEP_WARM` | `false` |
 | `HUB_TOKEN` | unset (set → work endpoints require `Authorization: Bearer …`) |

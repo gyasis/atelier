@@ -35,6 +35,8 @@ Endpoints:
     GET  /models               available aliases + which is loaded
     POST /admin/unload         force-unload the model (memory-governor courtesy)
     POST /transcribe           sync; for clips under ~a few minutes
+    POST /structure            LLM: detect format + reformat any transcript text
+    POST /summarize            LLM: summarize any text at a 0–1 strength
     POST /transcribe/batch     async; returns {job_id} for long audio
     GET  /jobs/<id>            job status snapshot
     GET  /jobs/<id>/stream     SSE progress: queued -> running -> done/error
@@ -82,6 +84,12 @@ MODEL_ALIASES = {
 OUTPUT_DIR = Path(os.environ.get("WHISPER_OUTPUT_DIR", str(Path.home() / "outputs/transcripts")))
 MAX_PULL_BYTES = int(os.environ.get("WHISPER_MAX_PULL_MB", "512")) * 1024 * 1024
 HUB_TOKEN = os.environ.get("HUB_TOKEN")
+# Optional LLM post-processing (structure detection + summarization) runs against
+# the hub's Ollama. Off unless a request asks for it — it wakes a ~20 GB model.
+# The model is also per-request selectable (llm_model=), defaulting here.
+LLM_URL = os.environ.get("WHISPER_LLM_URL", "http://127.0.0.1:11434")
+LLM_MODEL = os.environ.get("WHISPER_LLM_MODEL", "qwen3:32b")
+LLM_TIMEOUT = float(os.environ.get("WHISPER_LLM_TIMEOUT", "300"))
 # Constitutional idle-unload (see kokoro/dia): a multi-GB model squatting on
 # unified memory while idle starves video/LLM jobs. Default unload after 5 min.
 # KEEP_WARM=true opts out (e.g. a long batch transcription session).
@@ -396,6 +404,128 @@ async def _run_transcription(audio_path: str, repo: str, language: str | None,
     return result, elapsed
 
 
+# ---------- LLM post-processing (structure + summarize) ----------
+# These run AFTER transcription, OUTSIDE the whisper semaphore, so a slow LLM
+# call never blocks another transcription. They call the hub's Ollama; the
+# governor's Ollama log tailer picks the call up automatically. Opt-in only.
+import re as _re
+
+_THINK = _re.compile(r"<think>.*?</think>", _re.DOTALL | _re.IGNORECASE)
+
+
+def _strip_think(s: str) -> str:
+    """Drop <think>…</think> reasoning blocks some models (qwen3) emit."""
+    return _THINK.sub("", s).strip()
+
+
+def _extract_json(s: str) -> dict | None:
+    """Best-effort: pull the first {...} object out of an LLM reply."""
+    i, j = s.find("{"), s.rfind("}")
+    if i == -1 or j <= i:
+        return None
+    try:
+        return json.loads(s[i:j + 1])
+    except Exception:
+        return None
+
+
+async def _llm_chat(system: str, user: str, model: str) -> str:
+    """One non-streaming Ollama chat turn. Raises 502 if the LLM is unreachable
+    so the caller learns post-processing failed (the transcript itself is fine)."""
+    payload = {
+        "model": model, "stream": False,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "options": {"temperature": 0.2},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
+            r = await client.post(f"{LLM_URL}/api/chat", json=payload)
+            r.raise_for_status()
+            content = r.json().get("message", {}).get("content", "")
+    except Exception as e:
+        raise HTTPException(502, f"LLM post-processing failed ({model} @ {LLM_URL}): {e}")
+    return _strip_think(content).strip()
+
+
+def _analyze_signals(segments: list[dict]) -> dict:
+    """Cheap acoustic/textual cues that hint at the audio's structure — fed to
+    the LLM so type detection isn't blind to pauses and question density."""
+    n = len(segments)
+    questions = sum(1 for s in segments if s.get("text", "").strip().endswith("?"))
+    long_pauses, max_gap = 0, 0.0
+    for a, b in zip(segments, segments[1:]):
+        gap = (b.get("start", 0.0) or 0.0) - (a.get("end", 0.0) or 0.0)
+        if gap > 2.0:
+            long_pauses += 1
+        max_gap = max(max_gap, gap)
+    dur = segments[-1].get("end", 0.0) if segments else 0.0
+    return {"segments": n, "questions": questions, "long_pauses": long_pauses,
+            "max_gap_s": round(max_gap, 1), "duration_s": round(dur, 1)}
+
+
+async def _structure_text(text: str, signals: dict, hint: str | None, model: str) -> dict:
+    """Detect the transcript's format and reformat it for that format WITHOUT
+    summarizing — restructure only (speaker turns, Q/A, sections, paragraphs)."""
+    system = (
+        "You are a transcript editor. Given a spoken-audio transcript, (1) detect "
+        "its format and (2) reformat it cleanly for that format. Do NOT summarize, "
+        "shorten, or drop content — only restructure (speaker labels, Q/A pairs, "
+        "section headers, paragraph breaks) and fix obvious transcription artifacts. "
+        "Respond with ONLY a JSON object: {\"type\": one of "
+        "[interview, monologue, lecture, news_report, conversation, other], "
+        "\"formatted\": the restructured transcript as markdown}."
+    )
+    user = (f"Signals (cues from timing/text): {json.dumps(signals)}\n"
+            f"Caller hint: {hint or 'none — detect it'}\n\nTranscript:\n{text}")
+    raw = await _llm_chat(system, user, model)
+    data = _extract_json(raw) or {}
+    return {"detected_type": data.get("type", "other"),
+            "structured": data.get("formatted", raw),
+            "structure_model": model}
+
+
+async def _summarize_text(text: str, weight: float, model: str) -> dict:
+    """Summarize at an intensity set by weight (0=verbatim cleanup, 1=core ideas
+    only). Keeps substantive ideas/decisions/specifics; drops filler."""
+    weight = max(0.0, min(1.0, weight))
+    if weight < 0.34:
+        intensity = ("Light touch: keep nearly all substantive content and the "
+                     "original structure; only remove filler words, false starts, "
+                     "and verbatim repetition.")
+    elif weight < 0.67:
+        intensity = ("Moderate: condense to the key points as structured bullets / "
+                     "short paragraphs, roughly half the length.")
+    else:
+        intensity = ("Aggressive: distill to a tight executive summary of only the "
+                     "core ideas, decisions, and takeaways.")
+    system = (
+        "You summarize spoken-audio transcripts. Capture substantive ideas, "
+        "decisions, facts, and conclusions; preserve key specifics (names, numbers, "
+        "dates). Drop filler, hedging, small talk, and repetition — signal, not "
+        "fluff. Output clean markdown."
+    )
+    user = (f"Summarization strength = {weight:.2f} (0=verbatim cleanup, 1=core "
+            f"ideas only).\n{intensity}\n\nTranscript:\n{text}")
+    return {"summary": await _llm_chat(system, user, model),
+            "summary_weight": round(weight, 2), "summary_model": model}
+
+
+async def _postprocess(result: dict, structure: str | None, summarize: float | None,
+                       llm_model: str | None) -> dict:
+    """Run whichever post-processing the request asked for; return the extra
+    fields to merge into the response. Empty dict if nothing requested."""
+    model = llm_model or LLM_MODEL
+    text = result.get("text", "")
+    out: dict = {}
+    if structure is not None:
+        hint = None if structure.strip().lower() in ("auto", "true", "1", "") else structure
+        out.update(await _structure_text(text, _analyze_signals(result.get("segments", [])), hint, model))
+    if summarize is not None:
+        out.update(await _summarize_text(text, float(summarize), model))
+    return out
+
+
 # ---------- HTTP: health ----------
 @app.get("/healthz")
 def healthz():
@@ -440,6 +570,40 @@ def models(request: Request):
     }
 
 
+class StructureReq(BaseModel):
+    text: str = Field(..., min_length=1)
+    hint: str | None = None          # "auto" / a type hint like "interview"
+    llm_model: str | None = None
+
+
+class SummarizeReq(BaseModel):
+    text: str = Field(..., min_length=1)
+    weight: float = Field(0.5, ge=0.0, le=1.0)
+    llm_model: str | None = None
+
+
+@app.post("/structure")
+async def structure_ep(req: StructureReq, request: Request):
+    """Detect + reformat any transcript (no transcription step). Reusable on
+    text you already have."""
+    _check_auth(request)
+    if not req.text.strip():
+        raise HTTPException(400, "empty text")
+    hint = None if (req.hint or "").strip().lower() in ("auto", "", "true", "1") else req.hint
+    # No segment timing on a text-only call — analyze on text alone.
+    signals = {"segments": None, "questions": req.text.count("?"), "note": "text-only call (no timing)"}
+    return await _structure_text(req.text, signals, hint, req.llm_model or LLM_MODEL)
+
+
+@app.post("/summarize")
+async def summarize_ep(req: SummarizeReq, request: Request):
+    """Summarize any text at a 0–1 strength. Reusable on text you already have."""
+    _check_auth(request)
+    if not req.text.strip():
+        raise HTTPException(400, "empty text")
+    return await _summarize_text(req.text, req.weight, req.llm_model or LLM_MODEL)
+
+
 @app.post("/admin/unload")
 async def admin_unload(request: Request):
     """Force-unload now. Refuses while busy unless ?force=true (governor preempt)."""
@@ -468,6 +632,9 @@ async def transcribe(
     response_format: str = Form(default="json"),
     save: bool = Form(default=False),
     output_path: str | None = Form(default=None),
+    structure: str | None = Form(default=None),
+    summarize: float | None = Form(default=None),
+    llm_model: str | None = Form(default=None),
 ):
     """Synchronous transcription for short clips (under ~a few minutes).
 
@@ -477,11 +644,17 @@ async def transcribe(
     path (file already on the Mac).
     Output — response body in response_format (json|text|srt|vtt|verbose_json);
     set save=true to also persist it under WHISPER_OUTPUT_DIR (or output_path).
+    Post-process (optional, LLM via Ollama; requires json/verbose_json):
+      structure=auto|interview|lecture|… → adds {detected_type, structured}
+      summarize=0.0..1.0 (light→aggressive) → adds {summary, summary_weight}
+      llm_model=<ollama model>  overrides WHISPER_LLM_MODEL for this request.
     """
     _check_auth(request)
     fmt = response_format.lower()
     if fmt not in ("json", "text", "srt", "vtt", "verbose_json"):
         raise HTTPException(400, f"unknown response_format: {response_format}")
+    if (structure is not None or summarize is not None) and fmt not in ("json", "verbose_json"):
+        raise HTTPException(400, "structure/summarize require response_format=json or verbose_json")
     repo = _resolve_model(model)
 
     audio_path, raw, is_temp = await _resolve_source(file, url, path)
@@ -503,6 +676,11 @@ async def transcribe(
         headers["x-saved-path"] = _save_output(result, sha, fmt, output_path)
 
     body, media_type = _format_body(result, fmt)
+    # Optional LLM post-processing runs here — after the whisper semaphore is
+    # released, so it never blocks another transcription.
+    if (structure is not None or summarize is not None) and isinstance(body, dict):
+        body.update(await _postprocess(result, structure, summarize, llm_model))
+
     if isinstance(body, (dict, list)):
         return JSONResponse(content=body, headers=headers)
     return PlainTextResponse(content=body, media_type=media_type, headers=headers)
@@ -519,6 +697,9 @@ class BatchReq(BaseModel):
     response_format: str = Field(default="json")
     save: bool = True
     output_path: str | None = None
+    structure: str | None = None
+    summarize: float | None = None
+    llm_model: str | None = None
 
 
 async def _run_job(job_id: str, req: BatchReq) -> None:
@@ -544,8 +725,11 @@ async def _run_job(job_id: str, req: BatchReq) -> None:
                 except OSError:
                     pass
         fmt = req.response_format.lower()
-        saved = _save_output(result, sha, fmt, req.output_path) if req.save else None
         body, _ = _format_body(result, fmt)
+        # Optional LLM post-processing (structure / summarize) for long jobs.
+        if (req.structure is not None or req.summarize is not None) and isinstance(body, dict):
+            body.update(await _postprocess(result, req.structure, req.summarize, req.llm_model))
+        saved = _save_output(result, sha, fmt, req.output_path) if req.save else None
         job.update(status="done", finished_at=time.time(), elapsed_s=round(elapsed, 3),
                    saved_path=saved, result=body)
     except HTTPException as e:
