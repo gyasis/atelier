@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>WHISPER_MODEL_REPO</key>
+		<string>mlx-community/whisper-large-v3-turbo</string>
+		<key>WHISPER_OUTPUT_DIR</key>
+		<string>/Users/gyasisutton/outputs/transcripts</string>
+		<key>HF_HOME</key>
+		<string>/Users/gyasisutton/models/hf-cache</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/whisper-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+		<key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+		<string>1</string>
+		<key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key>
+		<string>0.0</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.whisper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/whisper-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8766</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/whisper-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/whisper-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/whisper-sidecar</string>
+</dict>
+</plist>

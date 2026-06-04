@@ -51,7 +51,7 @@ decision below exists to respect that ceiling.
 | **Audio · TTS** | **OmniVoice** | **8770** | k2-fsa/OmniVoice (Diffusion LM, PyTorch MPS) | **PRIMARY** — instruct-driven accent / pitch / gender | ~0.6–1× RTF; the natural-voice engine |
 | **Audio · TTS** | Kokoro | 8765 | kokoro-onnx (CoreML/MPS) | fallback — fast, fixed voices | ~0.6 s/line; Mac-offline resilience twin on Linux `:18765` |
 | **Audio · TTS** | Dia 1.6B | 8769 | nari-labs/Dia (PyTorch MPS) | **retired for live** — expressive cloning | ~10× RTF; overnight batch only |
-| **Audio · ASR** | Whisper | 8766 | mlx-whisper | transcription | planned |
+| **Audio · ASR** | Whisper | 8766 | mlx-whisper `whisper-large-v3-turbo` | transcription — file/url/path in, json/text/srt/vtt out | scaffolded; needs deploy + `brew install ffmpeg` |
 | **Image** | ComfyUI | 8188 | SDXL / Flux / SD3.5 | image gen | + optional `mflux` (MLX) on 8767 |
 | **Video** | ComfyUI | 8188 | Wan2.1 1.3B + 14B Q4 | text-to-video | verified 2026-05-23; LTX-Video / Hunyuan pending |
 

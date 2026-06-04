@@ -58,18 +58,21 @@ SIDECAR_BASE = {
     "omnivoice": "http://127.0.0.1:8770",
     "kokoro": "http://127.0.0.1:8765",
     "dia": "http://127.0.0.1:8769",
+    "whisper": "http://127.0.0.1:8766",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
     "omnivoice": Path.home() / "Library/Logs/omnivoice-sidecar.out.log",
     "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
     "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
+    "whisper": Path.home() / "Library/Logs/whisper-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
     "omnivoice": "io.macstudio.hub.omnivoice",
     "kokoro": "io.macstudio.hub.kokoro",
     "dia": "io.macstudio.hub.dia",
+    "whisper": "io.macstudio.hub.whisper",
 }
 
 _state = {
@@ -345,6 +348,31 @@ def _ingest_tts(name: str, line: str, persist: bool = True):
         except Exception as e:
             print(f"[governor] predictor.record(tts) failed: {e}", flush=True)
 
+# ASR (whisper) telemetry. The whisper sidecar logs:
+#   [asr] audio_s=720.0 chars=8123 bytes=11534336 14.62s rtf=49.2x lang=en
+# Surface these in the same observable pane as TTS synths, and feed the
+# predictor with kind="asr", in_units=audio_seconds (seconds of audio is the
+# natural ETA unit — compute scales with audio length, not text length).
+_ASR = re.compile(r'\[asr\].*?audio_s=(?P<audio>[\d.]+).*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(?P<rtf>[\d.]+)x)?')
+
+def _ingest_asr(name: str, line: str, persist: bool = True):
+    m = _ASR.search(line)
+    if not m:
+        return
+    audio_s = float(m.group("audio"))
+    secs = float(m.group("sec"))
+    _recent_synths.append({
+        "at": time.strftime("%H:%M:%S"), "ts": time.time(), "engine": name,
+        "kind": "asr", "audio_s": audio_s, "chars": int(m.group("chars")),
+        "seconds": secs, "rtf": float(m.group("rtf")) if m.group("rtf") else None,
+    })
+    if persist and audio_s:
+        try:
+            predictor.record(kind="asr", model=name, seconds=secs,
+                             in_units=audio_s, device="mps")
+        except Exception as e:
+            print(f"[governor] predictor.record(asr) failed: {e}", flush=True)
+
 async def _tail_sidecar(name: str, path: Path):
     while True:
         try:
@@ -356,8 +384,9 @@ async def _tail_sidecar(name: str, path: Path):
                 # is useful immediately after a restart (telemetry is in-memory and
                 # would otherwise cold-start empty).
                 if str(path) not in _backfilled:
-                    for ln in [x for x in f.readlines() if "[tts]" in x][-30:]:
+                    for ln in [x for x in f.readlines() if "[tts]" in x or "[asr]" in x][-30:]:
                         _ingest_tts(name, ln, persist=False)
+                        _ingest_asr(name, ln, persist=False)
                     _backfilled.add(str(path))
                 f.seek(0, os.SEEK_END)
                 inode = os.fstat(f.fileno()).st_ino
@@ -365,6 +394,7 @@ async def _tail_sidecar(name: str, path: Path):
                     line = f.readline()
                     if line:
                         _ingest_tts(name, line)
+                        _ingest_asr(name, line)
                         continue
                     await asyncio.sleep(1)
                     try:
@@ -483,13 +513,22 @@ def telemetry():
 
 @app.get("/estimate")
 def estimate(engine: str = "", model: str = "", kind: str = "", chars: int = 0,
-             out_tokens: int = 0, num_step: int | None = None,
+             out_tokens: int = 0, num_step: int | None = None, audio_s: float = 0.0,
              location: str = "local", state: str = "warm"):
     """Predict ETA via the modular predictor (per-model Bayesian, learns from
-    accumulated runs). TTS: ?engine=omnivoice&chars=N[&num_step=48|64]. LLM:
+    accumulated runs). TTS: ?engine=omnivoice&chars=N[&num_step=48|64]. ASR:
+    ?engine=whisper&audio_s=N. LLM:
     ?model=<name>[&out_tokens=N][&location=local|cloud][&state=warm|cold]."""
     if not kind:
-        kind = "tts" if engine in ("omnivoice", "kokoro", "dia") else "llm"
+        if engine == "whisper":
+            kind = "asr"
+        elif engine in ("omnivoice", "kokoro", "dia"):
+            kind = "tts"
+        else:
+            kind = "llm"
+    if kind == "asr":
+        return predictor.predict(kind="asr", model=(model or engine or "whisper"),
+                                 in_units=audio_s, state=state)
     if kind == "tts":
         mdl = model or engine
         if num_step:

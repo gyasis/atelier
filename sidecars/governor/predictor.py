@@ -7,8 +7,8 @@ are few samples, data takes over as runs accumulate). Known fixed costs
 (network RTT for cloud/Claude, cold-load for an unloaded model) are added on top.
 
 Feature context captured per run (extensible — add columns + priors):
-  kind        tts | llm
-  model       voice/engine (tts) or model name (llm)
+  kind        tts | asr | llm
+  model       voice/engine (tts) or model name (llm/asr)
   location    local | cloud      (cloud = Claude / remote API)
   host        which box ran it   (mac-studio, linux, claude-api)
   device      mps | cuda | cpu
@@ -46,14 +46,15 @@ PRIORS = {
     "llm:standard": {"rate": 20.0, "out": 350,  "k": 4},
     "llm:claude":   {"rate": 60.0, "out": 600,  "k": 3, "net_ms": 400},  # cloud: RTT-dominated
     "tts":          {"rate": 0.13, "out": None, "k": 3},              # sec/char
+    "asr":          {"rate": 0.022, "out": None, "k": 3},            # sec/audio-sec (~45x RTF, whisper-large-v3-turbo)
 }
 _THINKING = ("r1", "qwq", "reason", "thinking")
 _LARGE = ("70b", "34b", "32b", "27b", "coder-next", "devstral")
 
 
 def classify(kind: str, model: str | None, location: str) -> str:
-    if kind == "tts":
-        return "tts"
+    if kind in ("tts", "asr"):
+        return kind
     if location == "cloud" or (model or "").lower().startswith("claude"):
         return "llm:claude"
     m = (model or "").lower()
@@ -76,9 +77,9 @@ def record(*, kind, model, seconds, in_units=None, out_units=None, rate=None,
            net_latency_ms=0.0, queue_depth=0):
     """Persist one completed run. Computes rate if not given."""
     if rate is None and seconds:
-        if kind == "tts" and in_units:
-            rate = seconds / in_units                  # sec/char
-        elif kind != "tts" and out_units:
+        if kind in ("tts", "asr") and in_units:
+            rate = seconds / in_units                  # sec/char (tts) | sec/audio-sec (asr)
+        elif kind not in ("tts", "asr") and out_units:
             rate = out_units / seconds                 # decode tok/s
     c = _db()
     c.execute("INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -114,7 +115,7 @@ def predict(*, kind, model, in_units=0, out_units=None,
     n = len(rate_samples)
     rate, basis = _shrink(rate_samples, n, prior["rate"], k)
 
-    if kind == "tts":
+    if kind in ("tts", "asr"):
         core = in_units * rate
         core_p90 = core * 1.3
         pred_out = None

@@ -21,19 +21,24 @@ say "checking prerequisites…"
 command -v /opt/homebrew/bin/uv >/dev/null || die "uv not found at /opt/homebrew/bin/uv — install Homebrew + 'brew install uv'"
 command -v /opt/homebrew/bin/brew >/dev/null || die "Homebrew not found at /opt/homebrew/bin"
 xcode-select -p >/dev/null 2>&1 || die "Xcode Command Line Tools not installed — run 'xcode-select --install'"
+# whisper-sidecar decodes audio (mp3/m4a/etc.) via ffmpeg. Warn, don't die —
+# the other sidecars don't need it.
+command -v /opt/homebrew/bin/ffmpeg >/dev/null || say "  WARNING: ffmpeg not found — whisper-sidecar needs it to decode audio. Run 'brew install ffmpeg'."
 
 # ---------- 2. Directories ----------
 say "creating dirs…"
 mkdir -p "$SERVICES_DIR" "$LAUNCHAGENTS_DIR" "$LOGS_DIR"
 mkdir -p "$MODELS_DIR"/{kokoro,voice-refs,hf-cache,unet,clip,vae,loras,video,whisper,checkpoints}
+mkdir -p "$HOME/outputs/transcripts"
 
 # ---------- 3. Sidecar venvs ----------
-for SC in kokoro dia omnivoice governor; do
+for SC in kokoro dia omnivoice whisper governor; do
   SC_DIR="$SERVICES_DIR/${SC}-sidecar"
   case "$SC" in
     kokoro)    SC_DIR="$SERVICES_DIR/kokoro-sidecar" ;;
     dia)       SC_DIR="$SERVICES_DIR/voice-clone-sidecar" ;;
     omnivoice) SC_DIR="$SERVICES_DIR/omnivoice-sidecar" ;;
+    whisper)   SC_DIR="$SERVICES_DIR/whisper-sidecar" ;;
     governor)  SC_DIR="$SERVICES_DIR/governor-sidecar" ;;
   esac
   say "setting up sidecar: $SC -> $SC_DIR"
@@ -76,6 +81,8 @@ fi
 # Dia downloads on first run via HF_HOME — no install-time fetch needed.
 # OmniVoice (k2-fsa/OmniVoice) likewise auto-downloads its 13 model files on
 # first startup via HF_HOME — no install-time fetch needed.
+# Whisper (mlx-community/whisper-large-v3-turbo, ~1.6 GB) auto-downloads into
+# HF_HOME on first /transcribe — no install-time fetch needed.
 
 # Voice refs (LEO + SARAH) for Dia cloning
 if [ ! -f "$MODELS_DIR/voice-refs/leo_ref.wav" ]; then
@@ -103,7 +110,7 @@ done
 # ---------- 7. Verify ----------
 say "verifying services (give them ~30s to warm)…"
 sleep 30
-for PORT in 8765 8769 8770 8799; do
+for PORT in 8765 8766 8769 8770 8799; do
   if curl -sf --max-time 3 "http://localhost:$PORT/healthz" >/dev/null; then
     echo -e "  \033[1;32m✓\033[0m http://localhost:$PORT/healthz"
   else

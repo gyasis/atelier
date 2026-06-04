@@ -15,7 +15,7 @@ We want one LAN-only "household AI compute box" hosting multiple inference workl
 | Embeddings | Ollama (`nomic-embed-text`) | ✅ already available via Ollama |
 | TTS (basic, fixed voices) | Kokoro via Python sidecar | ⏳ to deploy |
 | TTS (voice cloning + expressive prosody) | F5-TTS / CosyVoice 2 / Fish Speech via Python sidecar | ⏳ to deploy (selection pending) |
-| ASR (transcription) | `mlx-whisper` via Python sidecar | ⏳ to deploy |
+| ASR (transcription) | `mlx-whisper` via Python sidecar | 🛠️ scaffolded (`sidecars/whisper/`), pending deploy |
 | Image generation | ComfyUI (SDXL / Flux / SD3.5) + optionally `mflux` MLX sidecar | ⏳ to deploy |
 | Video generation | ComfyUI (Wan2.1 1.3B + 14B Q4 verified; LTX-Video / HunyuanVideo pending) | ✅ deployed 2026-05-23 |
 

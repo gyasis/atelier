@@ -26,6 +26,7 @@ fail=0
 port_for() {
   case "$1" in
     kokoro)    echo 8765 ;;
+    whisper)   echo 8766 ;;
     dia)       echo 8769 ;;
     omnivoice) echo 8770 ;;
     governor)  echo 8799 ;;
