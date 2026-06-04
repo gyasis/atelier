@@ -41,6 +41,7 @@ fn log_path(name: &str) -> std::path::PathBuf {
     let home = dirs_next::home_dir().unwrap_or_default();
     match name {
         "omnivoice" => home.join("Library/Logs/omnivoice-sidecar.out.log"),
+        "whisper"   => home.join("Library/Logs/whisper-sidecar.out.log"),
         "comfyui"   => home.join("Library/Logs/comfyui.out.log"),
         "ollama"    => home.join(".ollama/logs/server.log"),
         _           => home.join(format!("Library/Logs/{name}.log")),
@@ -112,6 +113,16 @@ pub fn parse_line(source: &str, line: &str) {
                 }
             }
         }
+        "whisper" => {
+            // "[asr] model=whisper-large-v3-turbo audio_s=14.0 ... 1.60s rtf=8.7x lang=en"
+            if let Some(pos) = line.find("rtf=") {
+                let after = &line[pos + 4..];
+                let num_str = after.trim_end_matches('x').split_whitespace().next().unwrap_or("");
+                if let Ok(v) = num_str.parse::<f64>() {
+                    push(simple_metric("whisper", "asr_rtf", v));
+                }
+            }
+        }
         "comfyui" => {
             // "[45/100]"
             if let Some(pos) = line.find('[') {
@@ -156,7 +167,7 @@ pub fn drain_metrics() -> Vec<LogMetric> {
 /// Spawn background threads that tail each log file.
 /// Called once from lib.rs on app startup.
 pub fn start_watchers() {
-    for source in &["ollama", "omnivoice", "comfyui"] {
+    for source in &["ollama", "omnivoice", "whisper", "comfyui"] {
         let source = source.to_string();
         let path = log_path(&source);
         std::thread::spawn(move || {

@@ -33,6 +33,7 @@ Endpoints:
     GET  /healthz              liveness
     GET  /readyz               status (warm/cold/busy), resident model, queue depth
     GET  /models               available aliases + which is loaded
+    GET  /agent                self-describing manifest for AI agents (methods + how-to)
     POST /admin/unload         force-unload the model (memory-governor courtesy)
     POST /transcribe           sync; for clips under ~a few minutes
     POST /structure            LLM: detect format + reformat any transcript text
@@ -573,6 +574,109 @@ def models(request: Request):
         "default": DEFAULT_MODEL,
         "loaded": _loaded_model,
         "note": "pass model=<alias|hf/repo> to /transcribe; the sidecar hot-swaps to it",
+    }
+
+
+@app.get("/agent")
+def agent(request: Request):
+    """Self-describing manifest for AI agents. An agent fetches THIS first to
+    learn — at runtime — every method, parameter, and recipe, without baked-in
+    docs. Returns machine-readable `methods` plus a follow-along `instructions`
+    block. (FastAPI also serves /openapi.json + /docs, but those are verbose;
+    this is the curated, task-oriented version.)"""
+    _check_auth(request)
+    auth = ("send header `Authorization: Bearer <HUB_TOKEN>` on every request"
+            if HUB_TOKEN else "none required (HUB_TOKEN not set)")
+    return {
+        "service": "whisper",
+        "role": "ASR — speech-to-text, plus optional LLM structure/summarize",
+        "summary": "Transcribe audio (file upload, URL, or local path). Pick the "
+                   "model per request (fast turbo vs accurate large). Optionally "
+                   "post-process the transcript: detect+reformat structure, or "
+                   "summarize at a 0–1 strength.",
+        "auth": auth,
+        "models": {
+            "aliases": MODEL_ALIASES,
+            "loaded_now": _loaded_model,
+            "default": DEFAULT_MODEL,
+            "policy": "one model resident at a time; requesting a different one "
+                      "hot-swaps (unload old, load new) — fast but adds ~1s.",
+        },
+        "input_modes": {
+            "file": "multipart upload of the audio bytes (form field `file`)",
+            "url": "a link the sidecar downloads itself (form/json field `url`)",
+            "path": "absolute path to a file already on this host (no upload)",
+            "rule": "supply EXACTLY ONE of file/url/path per request",
+        },
+        "methods": [
+            {"name": "transcribe", "http": "POST /transcribe",
+             "encoding": "multipart/form-data",
+             "when": "clips up to ~a few minutes; want the result inline",
+             "params": {
+                 "file|url|path": "the audio source (exactly one)",
+                 "model": "alias (turbo|large|accurate) or HF repo; default = turbo",
+                 "language": "ISO code, else auto-detect",
+                 "initial_prompt": "bias spelling/terminology",
+                 "word_timestamps": "bool",
+                 "response_format": "json | text | srt | vtt | verbose_json",
+                 "save": "bool — also write to disk (sha256-named)",
+                 "output_path": "explicit save destination",
+                 "structure": "auto|interview|lecture|… → adds {detected_type, structured} (json only)",
+                 "summarize": "0.0–1.0 → adds {summary, summary_weight} (json only)",
+                 "llm_model": "override the Ollama model for structure/summarize",
+             },
+             "returns": "{text, language, segments[]} (+ structured/summary if asked); "
+                        "headers x-content-sha256, x-model, x-transcribe-seconds",
+             "example": "curl -s $URL/transcribe -F path=/abs/a.wav -F model=turbo -F summarize=0.7"},
+            {"name": "transcribe_batch", "http": "POST /transcribe/batch",
+             "encoding": "application/json",
+             "when": "long audio (tens of minutes+); returns immediately",
+             "params": "{url|path, model, response_format, save, structure, summarize, llm_model}",
+             "returns": "{job_id} — then poll/stream the job",
+             "example": "curl -s $URL/transcribe/batch -d '{\"path\":\"/abs/show.wav\",\"summarize\":0.5}'"},
+            {"name": "job_status", "http": "GET /jobs/{id}", "returns": "status snapshot"},
+            {"name": "job_stream", "http": "GET /jobs/{id}/stream",
+             "returns": "SSE: status → heartbeat → result/error"},
+            {"name": "job_result", "http": "GET /jobs/{id}/result", "returns": "transcript when done"},
+            {"name": "job_cancel", "http": "DELETE /jobs/{id}",
+             "returns": "cancels if not yet running"},
+            {"name": "structure", "http": "POST /structure",
+             "encoding": "application/json",
+             "when": "reformat ANY transcript text you already have",
+             "params": "{text, hint?: auto|interview|…, llm_model?}",
+             "returns": "{detected_type, structured}"},
+            {"name": "summarize", "http": "POST /summarize",
+             "encoding": "application/json",
+             "when": "summarize ANY text at a chosen strength",
+             "params": "{text, weight: 0.0–1.0, llm_model?}",
+             "returns": "{summary, summary_weight}"},
+            {"name": "models", "http": "GET /models", "returns": "aliases + resident model"},
+            {"name": "readyz", "http": "GET /readyz", "returns": "warm/cold/busy, queue depth"},
+        ],
+        "recipes": [
+            {"goal": "Quick transcript of a voice memo",
+             "do": "POST /transcribe with file=@memo.m4a (defaults: turbo, json)"},
+            {"goal": "High-accuracy transcript of tricky audio",
+             "do": "POST /transcribe with model=large"},
+            {"goal": "Subtitle file",
+             "do": "POST /transcribe with response_format=srt (or vtt), save=true"},
+            {"goal": "Meeting notes from a 1h recording",
+             "do": "POST /transcribe/batch {path, summarize:0.6}; poll /jobs/{id}; read summary"},
+            {"goal": "Interview turned into a clean Q&A doc",
+             "do": "POST /transcribe with structure=interview (or structure=auto)"},
+        ],
+        "instructions": (
+            "1) Choose the input mode: upload (file), link (url), or local file (path) — exactly one.\n"
+            "2) Choose a model: omit for fast `turbo`; set `model=large` when accuracy matters.\n"
+            "3) Choose the output: response_format json|text|srt|vtt; add save=true to persist.\n"
+            "4) Optionally post-process (json only): structure=auto to detect+reformat, "
+            "summarize=0.0..1.0 to distill (higher = more aggressive).\n"
+            "5) For long audio use /transcribe/batch and poll /jobs/{id} (or stream /jobs/{id}/stream).\n"
+            "6) GET /models to see which model is loaded; the sidecar hot-swaps on demand.\n"
+            "Notes: one model is resident at a time; post-processing calls a local LLM (slower, "
+            "wakes a ~20GB model); audio is decoded via ffmpeg so most formats work."
+        ),
+        "openapi": "/openapi.json",
     }
 
 

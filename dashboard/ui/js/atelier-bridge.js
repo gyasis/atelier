@@ -20,6 +20,7 @@ export async function fetchPressure() {
     tenants: [
       { name: 'omnivoice', state: 'busy', active_jobs: 3, queue_depth: 7, mem_gb: 18.0 },
       { name: 'kokoro',    state: 'idle', active_jobs: 0, queue_depth: 0, mem_gb: 4.0  },
+      { name: 'whisper',   state: 'idle', active_jobs: 0, queue_depth: 0, mem_gb: 2.0  },
       { name: 'comfyui',   state: 'busy', active_jobs: 1, queue_depth: 2, mem_gb: 12.0 },
       { name: 'qwen3:32b', state: 'idle', active_jobs: 0, queue_depth: 1, mem_gb: 20.0 },
     ],
@@ -50,6 +51,7 @@ export async function fetchPredictorStats() {
       { kind: 'llm', model: 'qwen3:32b',  runs: 142, avg_rate: 47.2, avg_seconds: 3.1 },
       { kind: 'tts', model: 'omnivoice',  runs: 89,  avg_rate: 0.31, avg_seconds: 3.0 },
       { kind: 'tts', model: 'kokoro',     runs: 34,  avg_rate: 0.18, avg_seconds: 2.2 },
+      { kind: 'asr', model: 'whisper-large-v3-turbo', runs: 8, avg_rate: 0.02, avg_seconds: 1.6 },
       { kind: 'img', model: 'wan2.1-1.3b',runs: 12,  avg_rate: 0.08, avg_seconds: 11.4 },
     ],
   };
@@ -61,6 +63,7 @@ export async function fetchSidecars() {
   return {
     omnivoice: { lifecycle: 'running', active_jobs: 3, queue_depth: 7 },
     kokoro:    { lifecycle: 'running', active_jobs: 0, queue_depth: 0 },
+    whisper:   { lifecycle: 'idle',    active_jobs: 0, queue_depth: 0 },
     dia:       { lifecycle: 'stopped', active_jobs: 0, queue_depth: 0 },
     comfyui:   { lifecycle: 'running', active_jobs: 1, queue_depth: 2 },
     ollama:    { models: [{ name: 'qwen3:32b', size: 20000000000 }] },

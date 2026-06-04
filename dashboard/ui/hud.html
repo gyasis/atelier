@@ -403,8 +403,8 @@ const pieInst = Chart.getChart('pieChart');
 const allCanvases = document.querySelectorAll('canvas');
 const tpsInst = allCanvases.length ? Chart.getChart(allCanvases[allCanvases.length-1]) : null;
 
-const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, comfyui: 12.0 };
-const dotColor = { tts: '#C8A96E', llm: '#6E86C8', img: '#9B6EC8', embed: '#63605A' };
+const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, whisper: 2.0, comfyui: 12.0 };
+const dotColor = { tts: '#C8A96E', llm: '#6E86C8', img: '#9B6EC8', asr: '#6EC8A9', embed: '#63605A' };
 
 function applyHudData(pressure, telemetry, sidecars, logMetrics) {
   // -- Memory pill --

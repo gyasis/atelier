@@ -23,9 +23,10 @@ pub async fn get_predictor_stats() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn get_sidecars() -> Result<serde_json::Value, String> {
     // Fetch all sidecar /readyz endpoints + Ollama /api/ps concurrently
-    let (omnivoice, kokoro, dia, comfyui, ollama) = tokio::join!(
+    let (omnivoice, kokoro, whisper, dia, comfyui, ollama) = tokio::join!(
         fetcher::fetch_sidecar(8770),
         fetcher::fetch_sidecar(8765),
+        fetcher::fetch_sidecar(8766),
         fetcher::fetch_sidecar(8769),
         fetcher::fetch_sidecar(8188),
         fetcher::fetch_ollama_ps(),
@@ -33,6 +34,7 @@ pub async fn get_sidecars() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "omnivoice": omnivoice,
         "kokoro":    kokoro,
+        "whisper":   whisper,
         "dia":       dia,
         "comfyui":   comfyui,
         "ollama":    ollama,

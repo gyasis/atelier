@@ -19,11 +19,12 @@ Polls every 2.5 s over `127.0.0.1`:
 | Governor | `:8799/pressure`, `/telemetry`, `/predictor/stats` |
 | omnivoice | `:8770/readyz` |
 | kokoro | `:8765/readyz` |
+| whisper | `:8766/readyz` |
 | dia | `:8769/readyz` |
 | comfyui | `:8188/readyz` |
 | Ollama | `:11434/api/ps` |
 
-Log-tail watcher reads `~/Library/Logs/{ollama,omnivoice,comfyui}.log` to extract real-time `tokens/s`, synthesis RTF, and image generation progress for the sparklines.
+Log-tail watcher reads `~/Library/Logs/{ollama,omnivoice,whisper,comfyui}.log` to extract real-time `tokens/s`, synthesis RTF, ASR RTF, and image generation progress for the sparklines.
 
 ## Build
 

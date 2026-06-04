@@ -17,6 +17,7 @@ Sources:
 Exposes (itself observable — no black boxes):
   GET  /healthz         liveness
   GET  /readyz          what it's monitoring + whether the log tail is live
+  GET  /agent           hub-wide self-describing manifest for AI agents (entry point)
   GET  /pressure        {level, free_gb, resident_gb, swapouts, tenants[], alerts[], auto_action, recommendation}
   GET  /telemetry       recent inference calls + lifecycle events + last spill
   GET  /estimate        predicted ETA for a TTS synth or LLM reply (Bayesian per-model)
@@ -506,6 +507,62 @@ def readyz():
 @app.get("/pressure")
 def pressure():
     return _state
+
+# Roles for the hub manifest. Sidecars that serve their own GET /agent are in
+# AGENT_CAPABLE — an agent drills into those for full per-service instructions.
+SIDECAR_ROLES = {
+    "omnivoice": "TTS — primary, instruct-driven accent/pitch/gender",
+    "kokoro": "TTS — fast, fixed voices (fallback)",
+    "dia": "TTS — expressive voice cloning (batch)",
+    "whisper": "ASR — speech-to-text, + optional LLM structure/summarize",
+}
+AGENT_CAPABLE = {"whisper"}
+
+@app.get("/agent")
+def agent():
+    """Hub-wide self-describing manifest. An agent fetches THIS ONE route to
+    discover all of Atelier: the live state, the control plane, and every
+    sidecar — then drills into each sidecar's own GET /agent for method-level
+    detail. The single entry point for 'how do I use Atelier?'."""
+    sidecars = {}
+    for name, base in SIDECAR_BASE.items():
+        sidecars[name] = {
+            "base_url": base,
+            "role": SIDECAR_ROLES.get(name, "sidecar"),
+            "readyz": f"{base}/readyz",
+            "agent": f"{base}/agent" if name in AGENT_CAPABLE else None,
+        }
+    return {
+        "service": "atelier-governor",
+        "role": "hub supervisor — memory governor, telemetry, ETA predictor",
+        "summary": "One LAN inference hub on a Mac Studio. The governor watches "
+                   "unified-memory pressure across Ollama + sidecars, evicts idle "
+                   "models to make room, records every run, and predicts ETAs.",
+        "how_to_start": (
+            "1) GET /pressure — see what's loaded, memory level, and per-tenant "
+            "state (busy/idle/cold) right now.\n"
+            "2) For each sidecar below, GET its `agent` route (if present) to learn "
+            "its methods/params, or `readyz` for live status.\n"
+            "3) Before a heavy job, check /pressure.level; if 'alarm', POST "
+            "/make-room to evict idle models. Use /estimate for an ETA first.\n"
+            "4) After a run, POST /report so the predictor sharpens."
+        ),
+        "control_plane": {
+            "GET /pressure": "live memory level + tenants[] (busy/idle/cold, jobs, queue)",
+            "GET /telemetry": "recent inference calls, synths (incl. [asr]), events",
+            "GET /estimate": "ETA for a job — ?engine=whisper&audio_s=N (asr) | "
+                             "?engine=<tts>&chars=N | ?model=<llm>&out_tokens=N",
+            "GET /predictor/stats": "learned per-(kind,model) compute stats",
+            "POST /report": "feed a completed run into the predictor",
+            "POST /make-room": "evict ONLY idle models to free memory",
+            "POST /force-stop": "human-gated preempt of a BUSY model",
+        },
+        "sidecars": sidecars,
+        "ollama": {"base_url": OLLAMA_URL, "role": "LLM + embeddings + VLM",
+                   "list_loaded": f"{OLLAMA_URL}/api/ps"},
+        "notes": "LAN-only. One model per sidecar is resident at a time; unified "
+                 "memory (64 GB) is the scarce resource — respect /pressure.",
+    }
 
 @app.get("/telemetry")
 def telemetry():
