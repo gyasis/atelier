@@ -5,8 +5,8 @@
 #
 # mlx / mlx-whisper move fast; floor-pinned so `uv pip install` pulls a recent
 # build. The web stack is version-matched to the other sidecars.
-mlx>=0.30.0
-mlx-whisper>=0.4.4
+mlx>=0.22.0
+mlx-whisper>=0.4.0
 
 # web stack (matched to kokoro/dia sidecars)
 fastapi==0.136.3
