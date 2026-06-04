@@ -59,8 +59,10 @@ import asyncio
 import gc
 import hashlib
 import json
+import math
 import os
 import secrets
+import statistics
 import subprocess
 import tempfile
 import time
@@ -580,6 +582,65 @@ async def _postprocess(result: dict, structure: str | None, summarize: float | N
     return out
 
 
+# ---------- transcription quality scoring (so an agent can self-correct) ----------
+# Whisper emits per-segment confidence stats. We roll them up into a `quality`
+# block with a `low_confidence` flag and an explicit `suggestion` — the signal an
+# agent reads to decide "this transcript is bad, retry with normalize/gain/model".
+# Thresholds follow whisper-community norms (avg_logprob<-1.0, no_speech>0.6,
+# compression_ratio>2.4 ≈ repetition/hallucination).
+def _suggest(low: bool, normalized: bool, gained: bool) -> str | None:
+    if not low:
+        return None
+    if not normalized:
+        return "low confidence — retry with normalize=speech (add gain_db=6 if the audio is very faint)"
+    if not gained:
+        return "still low after normalize — retry adding gain_db=6, or model=large for higher accuracy"
+    return "still low after normalize+gain — try model=large, or the audio may be too degraded / non-speech"
+
+
+def _quality(result: dict, *, normalized: bool, gained: bool) -> dict:
+    segs = result.get("segments", [])
+    if not segs:
+        return {"low_confidence": True, "confidence": 0.0, "segments": 0,
+                "reasons": ["no speech segments returned"],
+                "avg_logprob": None, "min_logprob": None,
+                "max_no_speech_prob": None, "max_compression_ratio": None,
+                "suggestion": _suggest(True, normalized, gained)}
+    logs = [s["avg_logprob"] for s in segs if s.get("avg_logprob") is not None]
+    nsp = [s["no_speech_prob"] for s in segs if s.get("no_speech_prob") is not None]
+    crs = [s["compression_ratio"] for s in segs if s.get("compression_ratio") is not None]
+    avg_logprob = round(statistics.mean(logs), 3) if logs else None
+    min_logprob = round(min(logs), 3) if logs else None
+    max_nsp = round(max(nsp), 3) if nsp else None
+    max_cr = round(max(crs), 3) if crs else None
+    # Text density catches the "Thank you."/empty hallucination on noisy/near-silent
+    # audio — those look confident by logprob but drop almost all the speech.
+    audio_s = (segs[-1].get("end") or 0.0)
+    chars = len(result.get("text", "").strip())
+    density = round(chars / audio_s, 2) if audio_s > 0 else 0.0
+    reasons = []
+    if avg_logprob is not None and avg_logprob < -1.0:
+        reasons.append(f"low avg_logprob {avg_logprob}")
+    if max_nsp is not None and max_nsp > 0.6:
+        reasons.append(f"high no_speech_prob {max_nsp}")
+    if max_cr is not None and max_cr > 2.4:
+        reasons.append(f"high compression_ratio {max_cr} (possible repetition/hallucination)")
+    if audio_s > 3.0 and density < 3.0:
+        reasons.append(f"low text density ({density} chars/s over {audio_s:.0f}s — likely dropped speech or hallucination)")
+    low = bool(reasons)
+    return {
+        "low_confidence": low,
+        # avg_logprob → 0..1 proxy (exp): ~-0.1 good ≈0.90, ~-1.0 weak ≈0.37.
+        "confidence": round(math.exp(avg_logprob), 3) if avg_logprob is not None else None,
+        "avg_logprob": avg_logprob, "min_logprob": min_logprob,
+        "max_no_speech_prob": max_nsp, "max_compression_ratio": max_cr,
+        "text_density_cps": density, "audio_seconds": round(audio_s, 1),
+        "segments": len(segs),
+        "reasons": reasons,
+        "suggestion": _suggest(low, normalized, gained),
+    }
+
+
 # ---------- HTTP: health ----------
 @app.get("/healthz")
 def healthz():
@@ -674,8 +735,8 @@ def agent(request: Request):
                  "summarize": "0.0–1.0 → adds {summary, summary_weight} (json only)",
                  "llm_model": "override the Ollama model for structure/summarize",
              },
-             "returns": "{text, language, segments[]} (+ structured/summary if asked); "
-                        "headers x-content-sha256, x-model, x-transcribe-seconds",
+             "returns": "{text, language, segments[], quality{...}} (+ structured/summary if asked); "
+                        "headers x-content-sha256, x-model, x-asr-confidence, x-asr-low-confidence",
              "example": "curl -s $URL/transcribe -F path=/abs/a.wav -F model=turbo -F summarize=0.7"},
             {"name": "transcribe_batch", "http": "POST /transcribe/batch",
              "encoding": "application/json",
@@ -715,7 +776,18 @@ def agent(request: Request):
              "do": "POST /transcribe with structure=interview (or structure=auto)"},
             {"goal": "Quiet or uneven recording that transcribes poorly",
              "do": "POST /transcribe with normalize=speech (or normalize=loudnorm); add gain_db=6 if very faint"},
+            {"goal": "Self-correct bad transcripts automatically",
+             "do": "transcribe → if response.quality.low_confidence, re-POST with the param in "
+                   "quality.suggestion (normalize=speech → gain_db=6 → model=large)"},
         ],
+        "quality_signal": {
+            "field": "every json response carries `quality`: {low_confidence, confidence (0–1), "
+                     "avg_logprob, max_no_speech_prob, max_compression_ratio, reasons[], suggestion}",
+            "how_to_use": "if quality.low_confidence is true, retry the SAME audio with the "
+                          "parameter named in quality.suggestion. Escalate: normalize=speech → "
+                          "+gain_db=6 → model=large. Stop when low_confidence clears or after model=large.",
+            "headers": "non-json callers read x-asr-confidence + x-asr-low-confidence",
+        },
         "instructions": (
             "1) Choose the input mode: upload (file), link (url), or local file (path) — exactly one.\n"
             "2) Choose a model: omit for fast `turbo`; set `model=large` when accuracy matters.\n"
@@ -844,12 +916,20 @@ async def transcribe(
             except OSError:
                 pass
 
+    quality = _quality(result, normalized=bool(normalize), gained=bool(gain_db))
     headers = {"x-content-sha256": sha, "x-transcribe-seconds": f"{elapsed:.3f}",
-               "x-model": repo}
+               "x-model": repo,
+               "x-asr-confidence": str(quality.get("confidence")),
+               "x-asr-low-confidence": "true" if quality["low_confidence"] else "false"}
     if save:
         headers["x-saved-path"] = _save_output(result, sha, fmt, output_path)
 
     body, media_type = _format_body(result, fmt)
+    # Quality block: lets an agent detect a bad transcript and retry with
+    # normalize / gain_db / model. (json/verbose_json only — text/srt/vtt callers
+    # read the x-asr-* headers instead.)
+    if isinstance(body, dict):
+        body["quality"] = quality
     # Optional LLM post-processing runs here — after the whisper semaphore is
     # released, so it never blocks another transcription.
     if (structure is not None or summarize is not None) and isinstance(body, dict):
@@ -910,6 +990,8 @@ async def _run_job(job_id: str, req: BatchReq) -> None:
                     pass
         fmt = req.response_format.lower()
         body, _ = _format_body(result, fmt)
+        if isinstance(body, dict):
+            body["quality"] = _quality(result, normalized=bool(req.normalize), gained=bool(req.gain_db))
         # Optional LLM post-processing (structure / summarize) for long jobs.
         if (req.structure is not None or req.summarize is not None) and isinstance(body, dict):
             body.update(await _postprocess(result, req.structure, req.summarize, req.llm_model))

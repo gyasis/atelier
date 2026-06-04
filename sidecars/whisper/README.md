@@ -73,6 +73,32 @@ Every response carries **`x-content-sha256`** (the cache key for that audio — 
 
 Optional form fields: `language` (ISO code, else auto-detect), `initial_prompt` (bias spelling/terms), `word_timestamps=true`.
 
+## Quality signal — let an agent detect a bad transcript and self-correct
+
+Every json response carries a `quality` block so a caller can tell whether the transcript is trustworthy *without* re-listening:
+
+```json
+"quality": {
+  "low_confidence": true,
+  "confidence": 0.56,                 // 0–1 proxy from avg_logprob
+  "avg_logprob": -0.58,
+  "max_no_speech_prob": 0.0,
+  "max_compression_ratio": 1.4,       // >2.4 ≈ repetition/hallucination
+  "text_density_cps": 0.67,           // chars/sec — catches the "Thank you." hallucination
+  "audio_seconds": 15.0,
+  "reasons": ["low text density (0.67 chars/s over 15s — likely dropped speech or hallucination)"],
+  "suggestion": "low confidence — retry with normalize=speech (add gain_db=6 if the audio is very faint)"
+}
+```
+
+`low_confidence` trips on any of: `avg_logprob < -1.0`, `no_speech_prob > 0.6`, `compression_ratio > 2.4`, or very low text density on long audio. Non-json callers read the `x-asr-confidence` / `x-asr-low-confidence` headers.
+
+**Agent self-correct loop** — read `quality.suggestion` and escalate:
+```
+transcribe → low_confidence? → normalize=speech → still? → +gain_db=6 → still? → model=large
+```
+Each retry is the *same audio* with the one parameter the suggestion names; stop when `low_confidence` clears (or after `model=large` — some audio is just too degraded).
+
 ## Audio cleanup — normalize quiet/uneven recordings (ffmpeg)
 
 Optional leveling applied **before** transcription, for faint or uneven audio. Runs on the CPU (off the GPU lock); the cache key stays the sha256 of the *original* audio.
