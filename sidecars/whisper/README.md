@@ -16,6 +16,24 @@ brew install ffmpeg
 
 The model (~1.6 GB) auto-downloads into `HF_HOME` on the first `/transcribe`.
 
+## Model — chosen per request (not hardcoded)
+
+Pass `model=` to decide which whisper Atelier loads. The sidecar keeps **one model resident** and **hot-swaps** when a request asks for a different one (memory courtesy — `large-v3` is ~3 GB vs turbo's ~1.6 GB).
+
+| `model=` | resolves to | trade-off |
+|---|---|---|
+| `turbo` *(default)* | `mlx-community/whisper-large-v3-turbo` | ~45× realtime — fast |
+| `large` / `accurate` | `mlx-community/whisper-large-v3` | ~3× slower, best accuracy |
+| `<hf/repo>` | any mlx-community whisper repo | explicit |
+
+```sh
+curl -s :8766/transcribe -F path=/path/a.wav                 # default (turbo)
+curl -s :8766/transcribe -F path=/path/a.wav -F model=large  # max accuracy
+curl -s :8766/models                                         # aliases + what's loaded
+```
+
+The governor records ETAs **per model** (from the `[asr] model=…` log line), so `/estimate?engine=whisper&model=whisper-large-v3&audio_s=720` gives a real, learned ETA — that's the signal for deciding which model to load for a given job. Omitting `model` falls back to `$WHISPER_MODEL_REPO`.
+
 ## Input — three ways the audio can arrive
 
 Pick **exactly one** of `file`, `url`, `path` per request.

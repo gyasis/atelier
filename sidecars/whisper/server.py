@@ -1,9 +1,20 @@
 """
 whisper-sidecar — ASR (speech-to-text) for the Mac Studio inference hub.
 
-Runs `whisper-large-v3-turbo` via `mlx-whisper` (Apple MLX). On an M1 Max this
-hits RTF ~40-50x (12 min of audio transcribed in ~14-18s), 30-50% faster than
+Runs Whisper via `mlx-whisper` (Apple MLX). On an M1 Max the turbo model hits
+RTF ~40-50x (12 min of audio transcribed in ~14-18s), 30-50% faster than
 whisper.cpp with no C++ build chain. See docs/ARCHITECTURE.md §5.2.
+
+MODEL — chosen per request, not hardcoded. Pass `model=` with an alias or a
+full HF repo. The sidecar keeps ONE model resident and hot-swaps when a request
+asks for a different one (memory courtesy — large-v3 ~3 GB vs turbo ~1.6 GB).
+The governor learns a separate ETA per model, so a caller can trade speed
+(turbo) against accuracy (large) on real numbers.
+    model=turbo     -> mlx-community/whisper-large-v3-turbo   (default, fast)
+    model=large     -> mlx-community/whisper-large-v3         (slower, accurate)
+    model=accurate  -> mlx-community/whisper-large-v3
+    model=<hf/repo> -> any mlx-community whisper repo
+Default when omitted: $WHISPER_MODEL_REPO.
 
 INPUT — three ways audio can arrive (pick exactly one per request):
     file=@clip.m4a      multipart upload (the audio bytes themselves)
@@ -20,7 +31,8 @@ OUTPUT — where the transcript goes:
 
 Endpoints:
     GET  /healthz              liveness
-    GET  /readyz               status (warm/cold/busy), job + queue depth
+    GET  /readyz               status (warm/cold/busy), resident model, queue depth
+    GET  /models               available aliases + which is loaded
     POST /admin/unload         force-unload the model (memory-governor courtesy)
     POST /transcribe           sync; for clips under ~a few minutes
     POST /transcribe/batch     async; returns {job_id} for long audio
@@ -30,7 +42,8 @@ Endpoints:
     DELETE /jobs/<id>          cancel a job (only effective before it starts running)
 
 Env vars:
-    WHISPER_MODEL_REPO    HF repo, default "mlx-community/whisper-large-v3-turbo"
+    WHISPER_MODEL_REPO    default model when a request omits `model`,
+                          default "mlx-community/whisper-large-v3-turbo"
     WHISPER_OUTPUT_DIR    where save=true writes, default ~/outputs/transcripts
     WHISPER_MAX_PULL_MB   cap on url-pulled audio, default 512
     HF_HOME               model cache (shared hub cache)
@@ -57,11 +70,19 @@ from pydantic import BaseModel, Field
 
 import mlx_whisper
 
-MODEL_REPO = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-large-v3-turbo")
+DEFAULT_MODEL = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-large-v3-turbo")
+# Caller-selectable models — the request decides which one Atelier loads.
+MODEL_ALIASES = {
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-turbo": "mlx-community/whisper-large-v3-turbo",
+    "large": "mlx-community/whisper-large-v3",
+    "large-v3": "mlx-community/whisper-large-v3",
+    "accurate": "mlx-community/whisper-large-v3",
+}
 OUTPUT_DIR = Path(os.environ.get("WHISPER_OUTPUT_DIR", str(Path.home() / "outputs/transcripts")))
 MAX_PULL_BYTES = int(os.environ.get("WHISPER_MAX_PULL_MB", "512")) * 1024 * 1024
 HUB_TOKEN = os.environ.get("HUB_TOKEN")
-# Constitutional idle-unload (see kokoro/dia): a 1.6 GB model squatting on
+# Constitutional idle-unload (see kokoro/dia): a multi-GB model squatting on
 # unified memory while idle starves video/LLM jobs. Default unload after 5 min.
 # KEEP_WARM=true opts out (e.g. a long batch transcription session).
 IDLE_UNLOAD_SECONDS = int(os.environ.get("IDLE_UNLOAD_SECONDS", "300"))
@@ -69,8 +90,9 @@ KEEP_WARM = os.environ.get("KEEP_WARM", "false").lower() in ("1", "true", "yes")
 IDLE_TICK_SECONDS = 30
 
 # mlx-whisper loads via an lru_cache'd loader; we track load state ourselves
-# since that cache is opaque. _loaded flips on warm, off on unload.
-_loaded = False
+# since that cache is opaque. _loaded_model = the HF repo currently resident
+# (None when unloaded). Exactly one model is kept resident at a time.
+_loaded_model: str | None = None
 _sem = asyncio.Semaphore(1)            # single-flight: MLX is single-stream on the GPU
 _last_request_at = time.monotonic()
 _unload_task: asyncio.Task | None = None
@@ -86,6 +108,13 @@ _waiting: int = 0
 _jobs: dict[str, dict] = {}
 
 
+def _resolve_model(name: str | None) -> str:
+    """Map a caller's `model` (alias or full repo) to an HF repo. None -> default."""
+    if not name:
+        return DEFAULT_MODEL
+    return MODEL_ALIASES.get(name.strip().lower(), name.strip())
+
+
 # ---------- model lifecycle ----------
 def _mlx_clear_cache() -> None:
     """Best-effort free of MLX's Metal buffer cache across mlx versions."""
@@ -99,37 +128,38 @@ def _mlx_clear_cache() -> None:
         pass
 
 
-async def _load_and_warm() -> None:
-    """Cold-load the model into mlx-whisper's loader cache + warm it. Idempotent."""
-    global _loaded, _idle_unloaded_at
-    if _loaded:
+async def _load_and_warm(repo: str = DEFAULT_MODEL) -> None:
+    """Cold-load `repo` into mlx-whisper's loader cache + warm it. Idempotent
+    for the same repo. Caller must hold _sem."""
+    global _loaded_model, _idle_unloaded_at
+    if _loaded_model == repo:
         return
     t0 = time.perf_counter()
-    print(f"[whisper] loading {MODEL_REPO}", flush=True)
+    print(f"[whisper] loading {repo}", flush=True)
     try:
-        # Populate the loader's lru_cache so the first /transcribe is warm.
-        await asyncio.to_thread(mlx_whisper.load_models.load_model, MODEL_REPO)
-        _loaded = True
+        await asyncio.to_thread(mlx_whisper.load_models.load_model, repo)
+        _loaded_model = repo
         _idle_unloaded_at = None
-        print(f"[whisper] model warm in {time.perf_counter()-t0:.1f}s", flush=True)
+        print(f"[whisper] model warm in {time.perf_counter()-t0:.1f}s ({repo})", flush=True)
     except Exception as e:
-        _loaded = False
-        print(f"[whisper] load failed: {e}", flush=True)
+        _loaded_model = None
+        print(f"[whisper] load failed for {repo}: {e}", flush=True)
 
 
 async def _unload_model() -> None:
-    """Drop the model from memory by clearing mlx-whisper's loader cache."""
-    global _loaded, _idle_unloaded_at
-    if not _loaded:
+    """Drop the resident model by clearing mlx-whisper's loader cache. Caller
+    must hold _sem."""
+    global _loaded_model, _idle_unloaded_at
+    if _loaded_model is None:
         return
-    print("[whisper] idle-unload — clearing model cache", flush=True)
+    print(f"[whisper] idle-unload — clearing model cache ({_loaded_model})", flush=True)
     try:
-        # The loader is @lru_cache'd; clearing it drops the last model reference.
+        # The loader is @lru_cache'd; clearing it drops every cached model.
         if hasattr(mlx_whisper.load_models.load_model, "cache_clear"):
             mlx_whisper.load_models.load_model.cache_clear()
     except Exception as e:
         print(f"[whisper] cache_clear failed: {e}", flush=True)
-    _loaded = False
+    _loaded_model = None
     _idle_unloaded_at = time.monotonic()
     gc.collect()
     _mlx_clear_cache()
@@ -142,11 +172,11 @@ async def _idle_watcher() -> None:
     print(f"[whisper] idle-watcher active (unload after {IDLE_UNLOAD_SECONDS}s idle)", flush=True)
     while True:
         await asyncio.sleep(IDLE_TICK_SECONDS)
-        if not _loaded:
+        if _loaded_model is None:
             continue
         if _active == 0 and _waiting == 0 and time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
             async with _sem:
-                if _loaded and _active == 0:
+                if _loaded_model is not None and _active == 0:
                     await _unload_model()
 
 
@@ -155,7 +185,7 @@ async def lifespan(app: FastAPI):
     global _unload_task
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     async with _sem:
-        await _load_and_warm()
+        await _load_and_warm(DEFAULT_MODEL)
     _unload_task = asyncio.create_task(_idle_watcher())
     yield
     if _unload_task and not _unload_task.done():
@@ -306,53 +336,62 @@ def _save_output(result: dict, sha: str, fmt: str, output_path: str | None) -> s
     return str(dest)
 
 
-def _transcribe_sync(audio_path: str, language: str | None,
+def _transcribe_sync(audio_path: str, repo: str, language: str | None,
                      initial_prompt: str | None, word_timestamps: bool) -> dict:
-    """Blocking mlx-whisper call. Runs in a thread off the event loop."""
+    """Blocking mlx-whisper call. Runs in a thread off the event loop. `repo` is
+    already resident (pre-loaded under the semaphore), so transcribe's internal
+    loader hits the cache."""
     return mlx_whisper.transcribe(
         audio_path,
-        path_or_hf_repo=MODEL_REPO,
+        path_or_hf_repo=repo,
         language=language,
         initial_prompt=initial_prompt,
         word_timestamps=word_timestamps,
     )
 
 
-async def _run_transcription(audio_path: str, language: str | None,
+async def _run_transcription(audio_path: str, repo: str, language: str | None,
                              initial_prompt: str | None, word_timestamps: bool,
                              audio_bytes: int):
-    """Cold-load if needed, then transcribe under the single-flight semaphore.
-    Returns (result, elapsed_seconds) and emits the [asr] telemetry line the
-    governor tails."""
+    """Ensure `repo` is the resident model (hot-swap if needed), then transcribe —
+    all under the single-flight semaphore so a swap can't race a job. Returns
+    (result, elapsed_seconds) and emits the [asr] telemetry line the governor
+    tails (tagged with the model, so ETAs are learned per model)."""
     global _last_request_at, _active, _waiting
-    if not _loaded:
-        print("[whisper] cold-load triggered by request", flush=True)
-        async with _sem:
-            await _load_and_warm()
-        if not _loaded:
-            raise HTTPException(503, "cold-load failed; see server logs")
     t0 = time.perf_counter()
     _waiting += 1
     async with _sem:
         _waiting -= 1
         _active += 1
         try:
+            # The request decides which model is loaded. Swap if a different one
+            # is resident; cold-load if nothing is.
+            if _loaded_model != repo:
+                if _loaded_model is not None:
+                    await _unload_model()
+                await _load_and_warm(repo)
+                if _loaded_model != repo:
+                    raise HTTPException(503, f"could not load model {repo}; see server logs")
             result = await asyncio.to_thread(
-                _transcribe_sync, audio_path, language, initial_prompt, word_timestamps
+                _transcribe_sync, audio_path, repo, language, initial_prompt, word_timestamps
             )
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(500, f"transcription failed: {e}")
         finally:
             _active -= 1
             _last_request_at = time.monotonic()
     elapsed = time.perf_counter() - t0
-    # Telemetry line the governor ingests (one observable pane). audio_s is the
+    # Telemetry line the governor ingests (one observable pane). Tagged with the
+    # model so the predictor learns turbo vs large separately. audio_s is the
     # natural ASR ETA unit (seconds of audio -> seconds of compute).
     segs = result.get("segments", [])
     audio_s = segs[-1]["end"] if segs else 0.0
     chars = len(result.get("text", ""))
     rtf = (audio_s / elapsed) if elapsed > 0 else 0.0
-    print(f"[asr] audio_s={audio_s:.1f} chars={chars} bytes={audio_bytes} "
+    short = repo.split("/")[-1]
+    print(f"[asr] model={short} audio_s={audio_s:.1f} chars={chars} bytes={audio_bytes} "
           f"{elapsed:.2f}s rtf={rtf:.1f}x lang={result.get('language')}", flush=True)
     return result, elapsed
 
@@ -360,13 +399,14 @@ async def _run_transcription(audio_path: str, language: str | None,
 # ---------- HTTP: health ----------
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "whisper", "model": MODEL_REPO, "version": "1.0"}
+    return {"ok": True, "service": "whisper", "default_model": DEFAULT_MODEL,
+            "loaded_model": _loaded_model, "version": "1.1"}
 
 
 @app.get("/readyz")
 def readyz():
-    state = "warm" if _loaded else "cold"
-    lifecycle = "cold" if not _loaded else ("busy" if _active > 0 else "idle")
+    state = "warm" if _loaded_model else "cold"
+    lifecycle = "cold" if not _loaded_model else ("busy" if _active > 0 else "idle")
     return {
         "ok": True,
         "state": state,
@@ -374,14 +414,29 @@ def readyz():
         "busy": _active > 0,
         "active_jobs": _active,
         "queue_depth": _waiting,
-        "warmed": _loaded,
-        "model": MODEL_REPO,
+        "warmed": _loaded_model is not None,
+        "model": _loaded_model or DEFAULT_MODEL,
+        "loaded_model": _loaded_model,
+        "default_model": DEFAULT_MODEL,
         "device": "mps",
         "batch_jobs": len(_jobs),
         "idle_seconds": round(time.monotonic() - _last_request_at, 1),
         "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
         "keep_warm": KEEP_WARM,
         "last_unload_ago_s": round(time.monotonic() - _idle_unloaded_at, 1) if _idle_unloaded_at else None,
+    }
+
+
+@app.get("/models")
+def models(request: Request):
+    """What can be requested, and what's resident right now. Lets a caller (or
+    the dashboard) decide which model to ask for."""
+    _check_auth(request)
+    return {
+        "aliases": MODEL_ALIASES,
+        "default": DEFAULT_MODEL,
+        "loaded": _loaded_model,
+        "note": "pass model=<alias|hf/repo> to /transcribe; the sidecar hot-swaps to it",
     }
 
 
@@ -392,11 +447,11 @@ async def admin_unload(request: Request):
     force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
     if _active > 0 and not force:
         return {"unloaded": False, "refused": "busy", "active_jobs": _active}
-    was_loaded = _loaded
-    if was_loaded:
+    was = _loaded_model
+    if was is not None:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was_loaded, "forced": force, "model": MODEL_REPO}
+    return {"unloaded": was is not None, "forced": force, "model": was}
 
 
 # ---------- HTTP: sync transcribe ----------
@@ -406,6 +461,7 @@ async def transcribe(
     file: UploadFile | None = File(default=None),
     url: str | None = Form(default=None),
     path: str | None = Form(default=None),
+    model: str | None = Form(default=None),
     language: str | None = Form(default=None),
     initial_prompt: str | None = Form(default=None),
     word_timestamps: bool = Form(default=False),
@@ -415,6 +471,8 @@ async def transcribe(
 ):
     """Synchronous transcription for short clips (under ~a few minutes).
 
+    Model — `model` picks which whisper Atelier loads (alias turbo|large|accurate
+    or a full HF repo); omitted = WHISPER_MODEL_REPO. The sidecar hot-swaps to it.
     Source — exactly one of: file (multipart upload), url (link to pull),
     path (file already on the Mac).
     Output — response body in response_format (json|text|srt|vtt|verbose_json);
@@ -424,12 +482,13 @@ async def transcribe(
     fmt = response_format.lower()
     if fmt not in ("json", "text", "srt", "vtt", "verbose_json"):
         raise HTTPException(400, f"unknown response_format: {response_format}")
+    repo = _resolve_model(model)
 
     audio_path, raw, is_temp = await _resolve_source(file, url, path)
     sha = hashlib.sha256(raw).hexdigest()
     try:
         result, elapsed = await _run_transcription(
-            audio_path, language, initial_prompt, word_timestamps, len(raw)
+            audio_path, repo, language, initial_prompt, word_timestamps, len(raw)
         )
     finally:
         if is_temp:
@@ -439,7 +498,7 @@ async def transcribe(
                 pass
 
     headers = {"x-content-sha256": sha, "x-transcribe-seconds": f"{elapsed:.3f}",
-               "x-model": MODEL_REPO}
+               "x-model": repo}
     if save:
         headers["x-saved-path"] = _save_output(result, sha, fmt, output_path)
 
@@ -453,6 +512,7 @@ async def transcribe(
 class BatchReq(BaseModel):
     url: str | None = None
     path: str | None = None
+    model: str | None = None
     language: str | None = None
     initial_prompt: str | None = None
     word_timestamps: bool = False
@@ -468,12 +528,14 @@ async def _run_job(job_id: str, req: BatchReq) -> None:
         return
     job.update(status="running", started_at=time.time())
     try:
+        repo = _resolve_model(req.model)
+        job["model"] = repo
         audio_path, raw, is_temp = await _resolve_source(None, req.url, req.path)
         sha = hashlib.sha256(raw).hexdigest()
         job["sha256"] = sha
         try:
             result, elapsed = await _run_transcription(
-                audio_path, req.language, req.initial_prompt, req.word_timestamps, len(raw)
+                audio_path, repo, req.language, req.initial_prompt, req.word_timestamps, len(raw)
             )
         finally:
             if is_temp:
@@ -496,8 +558,9 @@ async def _run_job(job_id: str, req: BatchReq) -> None:
 async def transcribe_batch(req: BatchReq, request: Request):
     """Submit a long transcription. Returns {job_id} immediately; poll
     /jobs/<id> or stream /jobs/<id>/stream. Source is url or path (uploads go
-    through the sync endpoint). save defaults to true — long jobs persist by
-    sha256 so the result survives a client disconnect."""
+    through the sync endpoint). `model` selects the whisper to load. save
+    defaults to true — long jobs persist by sha256 so the result survives a
+    client disconnect."""
     _check_auth(request)
     if not (req.url or req.path):
         raise HTTPException(400, "batch requires url or path")
@@ -505,7 +568,8 @@ async def transcribe_batch(req: BatchReq, request: Request):
         raise HTTPException(400, "provide only one of url or path")
     job_id = secrets.token_hex(8)
     _jobs[job_id] = {"id": job_id, "status": "queued", "created_at": time.time(),
-                     "source": req.url or req.path, "cancel": False}
+                     "source": req.url or req.path, "model": _resolve_model(req.model),
+                     "cancel": False}
     asyncio.create_task(_run_job(job_id, req))
     return {"job_id": job_id, "status": "queued"}
 
@@ -532,7 +596,7 @@ def job_result(job_id: str, request: Request):
         raise HTTPException(404, "no such job")
     if job["status"] != "done":
         raise HTTPException(409, f"job not done (status={job['status']})")
-    return {"job_id": job_id, "sha256": job.get("sha256"),
+    return {"job_id": job_id, "sha256": job.get("sha256"), "model": job.get("model"),
             "saved_path": job.get("saved_path"), "result": job.get("result")}
 
 

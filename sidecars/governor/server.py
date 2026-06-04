@@ -348,12 +348,14 @@ def _ingest_tts(name: str, line: str, persist: bool = True):
         except Exception as e:
             print(f"[governor] predictor.record(tts) failed: {e}", flush=True)
 
-# ASR (whisper) telemetry. The whisper sidecar logs:
-#   [asr] audio_s=720.0 chars=8123 bytes=11534336 14.62s rtf=49.2x lang=en
-# Surface these in the same observable pane as TTS synths, and feed the
-# predictor with kind="asr", in_units=audio_seconds (seconds of audio is the
-# natural ETA unit — compute scales with audio length, not text length).
-_ASR = re.compile(r'\[asr\].*?audio_s=(?P<audio>[\d.]+).*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(?P<rtf>[\d.]+)x)?')
+# ASR (whisper) telemetry. The whisper sidecar logs (model is selectable per
+# request, so it's tagged on every line):
+#   [asr] model=whisper-large-v3-turbo audio_s=720.0 chars=8123 bytes=11534336 14.62s rtf=49.2x lang=en
+# Surface these in the same observable pane as TTS synths, and feed the predictor
+# with kind="asr", model=<the whisper variant>, in_units=audio_seconds (seconds
+# of audio is the natural ETA unit). Per-model recording is what lets a caller
+# compare turbo vs large ETAs and decide which to load.
+_ASR = re.compile(r'\[asr\](?:.*?model=(?P<model>[\w./-]+))?.*?audio_s=(?P<audio>[\d.]+).*?chars=(?P<chars>\d+).*?(?P<sec>[\d.]+)s(?:.*?rtf=(?P<rtf>[\d.]+)x)?')
 
 def _ingest_asr(name: str, line: str, persist: bool = True):
     m = _ASR.search(line)
@@ -361,14 +363,15 @@ def _ingest_asr(name: str, line: str, persist: bool = True):
         return
     audio_s = float(m.group("audio"))
     secs = float(m.group("sec"))
+    model = m.group("model") or name
     _recent_synths.append({
         "at": time.strftime("%H:%M:%S"), "ts": time.time(), "engine": name,
-        "kind": "asr", "audio_s": audio_s, "chars": int(m.group("chars")),
+        "kind": "asr", "model": model, "audio_s": audio_s, "chars": int(m.group("chars")),
         "seconds": secs, "rtf": float(m.group("rtf")) if m.group("rtf") else None,
     })
     if persist and audio_s:
         try:
-            predictor.record(kind="asr", model=name, seconds=secs,
+            predictor.record(kind="asr", model=model, seconds=secs,
                              in_units=audio_s, device="mps")
         except Exception as e:
             print(f"[governor] predictor.record(asr) failed: {e}", flush=True)
@@ -527,7 +530,9 @@ def estimate(engine: str = "", model: str = "", kind: str = "", chars: int = 0,
         else:
             kind = "llm"
     if kind == "asr":
-        return predictor.predict(kind="asr", model=(model or engine or "whisper"),
+        # model is the whisper variant short-name as recorded from [asr] logs,
+        # e.g. whisper-large-v3-turbo (fast) or whisper-large-v3 (accurate).
+        return predictor.predict(kind="asr", model=(model or "whisper-large-v3-turbo"),
                                  in_units=audio_s, state=state)
     if kind == "tts":
         mdl = model or engine
