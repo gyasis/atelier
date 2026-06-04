@@ -79,7 +79,7 @@ DEFAULT_MODEL = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-larg
 # the HF repo name otherwise. Point these at ~/models/whisper/<dir> so nothing
 # ever re-downloads.
 _TURBO = os.environ.get("WHISPER_TURBO_PATH", "mlx-community/whisper-large-v3-turbo")
-_LARGE = os.environ.get("WHISPER_LARGE_PATH", "mlx-community/whisper-large-v3")
+_LARGE = os.environ.get("WHISPER_LARGE_PATH", "mlx-community/whisper-large-v3-mlx")
 MODEL_ALIASES = {
     "turbo": _TURBO,
     "large-turbo": _TURBO,
