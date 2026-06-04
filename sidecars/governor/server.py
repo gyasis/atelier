@@ -516,7 +516,7 @@ SIDECAR_ROLES = {
     "dia": "TTS — expressive voice cloning (batch)",
     "whisper": "ASR — speech-to-text, + optional LLM structure/summarize",
 }
-AGENT_CAPABLE = {"whisper"}
+AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia"}
 
 @app.get("/agent")
 def agent():

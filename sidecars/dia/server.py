@@ -292,6 +292,46 @@ async def admin_unload(request: Request):
     return {"unloaded": was_loaded, "forced": force, "model": MODEL_CHECKPOINT, "device": DEVICE}
 
 
+@app.get("/agent")
+def agent(request: Request):
+    """Self-describing manifest for AI agents — methods, params, how-to."""
+    _check_auth(request)
+    auth = ("send header `Authorization: Bearer <HUB_TOKEN>` on every request"
+            if HUB_TOKEN else "none required (HUB_TOKEN not set)")
+    return {
+        "service": "dia",
+        "role": "TTS — expressive multi-speaker dialogue with voice cloning (batch)",
+        "summary": "Generate expressive speech in cloned canonical voices "
+                   "(LEO=[S1], SARAH=[S2]). ~10x realtime — best for overnight/batch "
+                   "dialogue, not live synthesis.",
+        "auth": auth,
+        "voices": {"cloning": _clone_audio is not None,
+                   "speakers": {"[S1]": "LEO", "[S2]": "SARAH"},
+                   "note": "tag lines with [S1]/[S2]; untagged text defaults to [S1]"},
+        "methods": [
+            {"name": "tts", "http": "POST /tts", "encoding": "application/json",
+             "params": {"text": "dialogue with [S1]/[S2] speaker tags",
+                        "use_voice_clone": "bool (default true)",
+                        "max_new_tokens": "128–4096", "guidance_scale": "1–10",
+                        "temperature": "0.5–2.5", "top_p": "0.1–1.0", "top_k": "1–200"},
+             "returns": "audio/wav (44.1kHz); headers x-engine, x-voice-clone",
+             "example": "curl -s $URL/tts -H 'content-type: application/json' "
+                        "-d '{\"text\":\"[S1] Welcome back. [S2] Glad to be here.\"}' --output out.wav"},
+            {"name": "readyz", "http": "GET /readyz", "returns": "warm/cold/busy"},
+        ],
+        "recipes": [
+            {"goal": "Two-host podcast banter", "do": "POST /tts {text:'[S1] … [S2] …'}"},
+            {"goal": "Single narrator (LEO)", "do": "POST /tts {text:'your line'} (defaults to [S1])"},
+        ],
+        "instructions": (
+            "1) Write the script with [S1] (LEO) / [S2] (SARAH) speaker tags.\n"
+            "2) POST /tts {text}; cloning is on by default so the voices stay canonical.\n"
+            "3) ~10x realtime — prefer batch use. For fast/live TTS use kokoro or omnivoice."
+        ),
+        "openapi": "/openapi.json",
+    }
+
+
 class TtsReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=8000)
     max_new_tokens: int = Field(3072, ge=128, le=4096)

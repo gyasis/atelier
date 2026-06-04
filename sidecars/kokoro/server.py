@@ -183,6 +183,44 @@ async def admin_unload(request: Request):
     return {"unloaded": was_loaded, "forced": force, "model": os.path.basename(MODEL_PATH)}
 
 
+@app.get("/agent")
+def agent(request: Request):
+    """Self-describing manifest for AI agents — methods, params, how-to."""
+    _check_auth(request)
+    auth = ("send header `Authorization: Bearer <HUB_TOKEN>` on every request"
+            if HUB_TOKEN else "none required (HUB_TOKEN not set)")
+    return {
+        "service": "kokoro",
+        "role": "TTS — fast, fixed-voice speech synthesis (low-latency fallback)",
+        "summary": "Turn text into speech with a preset voice. Fastest engine on "
+                   "the hub (~sub-second per line) — use it when you want quick "
+                   "audio and don't need cloning or expressive prosody.",
+        "auth": auth,
+        "voices": {"list_route": "GET /voices", "default": DEFAULT_VOICE, "count": len(_voices)},
+        "methods": [
+            {"name": "tts", "http": "POST /tts", "encoding": "application/json",
+             "params": {"text": "1–5000 chars", "voice": f"voice id (default {DEFAULT_VOICE}); GET /voices",
+                        "speed": "0.5–2.0", "lang": "e.g. en-us"},
+             "returns": "audio/wav (PCM16); header x-synth-seconds",
+             "example": "curl -s $URL/tts -H 'content-type: application/json' "
+                        "-d '{\"text\":\"Hello there\",\"voice\":\"af_bella\"}' --output out.wav"},
+            {"name": "voices", "http": "GET /voices", "returns": "{voices[], default}"},
+            {"name": "readyz", "http": "GET /readyz", "returns": "warm/cold/busy, queue depth"},
+        ],
+        "recipes": [
+            {"goal": "Quick spoken line", "do": "POST /tts {text}"},
+            {"goal": "Pick a specific voice", "do": "GET /voices, then POST /tts {text, voice}"},
+        ],
+        "instructions": (
+            "1) GET /voices to see available voice ids.\n"
+            "2) POST /tts {text, voice, speed, lang}; audio/wav comes back inline.\n"
+            "3) Need cloning/expressive voices? use the dia sidecar. Need instruct-"
+            "driven accents? use omnivoice."
+        ),
+        "openapi": "/openapi.json",
+    }
+
+
 class TtsReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
     voice: str = DEFAULT_VOICE

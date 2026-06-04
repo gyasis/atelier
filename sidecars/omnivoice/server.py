@@ -182,6 +182,49 @@ async def admin_unload(request: Request):
     return {"unloaded": was_loaded, "forced": force, "model": MODEL_ID, "device": DEVICE}
 
 
+@app.get("/agent")
+def agent(request: Request):
+    """Self-describing manifest for AI agents — methods, params, how-to."""
+    _check_auth(request)
+    auth = ("send header `Authorization: Bearer <HUB_TOKEN>` on every request"
+            if HUB_TOKEN else "none required (HUB_TOKEN not set)")
+    return {
+        "service": "omnivoice",
+        "role": "TTS — PRIMARY; instruct-driven accent/pitch/tone + zero-shot cloning",
+        "summary": "The natural-voice engine. Control delivery with a plain-language "
+                   "`instruct` prompt (accent, tone, emotion), clone a voice from a "
+                   "3–10s reference clip, or shift pitch — all per request.",
+        "auth": auth,
+        "voices": {"mode": "zero-shot / instruct-driven (no preset list)",
+                   "cloning": "pass ref_audio (+ ref_text) with a 3–10s clip"},
+        "methods": [
+            {"name": "tts", "http": "POST /tts", "encoding": "application/json",
+             "params": {"text": "1–5000 chars", "language": "e.g. en",
+                        "instruct": "plain-language style, e.g. 'British accent, bright feminine tone'",
+                        "ref_audio": "path to a 3–10s clip to clone", "ref_text": "transcript of ref_audio",
+                        "speed": "0.5–2.0", "num_step": "8–128 diffusion steps (higher=smoother,slower)",
+                        "guidance_scale": "1–5", "class_temperature": "0–1.5 prosodic variation",
+                        "pitch_semitones": "-12..+12"},
+             "returns": "audio/wav (24kHz); header x-synth-seconds",
+             "example": "curl -s $URL/tts -H 'content-type: application/json' "
+                        "-d '{\"text\":\"Welcome\",\"instruct\":\"warm, slow, deep male\"}' --output out.wav"},
+            {"name": "readyz", "http": "GET /readyz", "returns": "warm/cold/busy, queue depth"},
+        ],
+        "recipes": [
+            {"goal": "Natural narration with a style", "do": "POST /tts {text, instruct:'calm documentary narrator'}"},
+            {"goal": "Clone a voice", "do": "POST /tts {text, ref_audio:'/abs/ref.wav', ref_text:'…'}"},
+            {"goal": "Brighter/higher voice", "do": "POST /tts {text, pitch_semitones:3}"},
+        ],
+        "instructions": (
+            "1) POST /tts {text}. Add `instruct` for accent/tone/emotion — this engine's superpower.\n"
+            "2) To clone, pass ref_audio (3–10s) and ref_text.\n"
+            "3) num_step trades quality vs speed; pitch_semitones nudges brightness.\n"
+            "4) Fastest fixed-voice TTS → kokoro. [S1]/[S2] dialogue cloning → dia."
+        ),
+        "openapi": "/openapi.json",
+    }
+
+
 class TtsReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
     language: str = "en"
