@@ -518,12 +518,25 @@ SIDECAR_ROLES = {
 }
 AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia"}
 
+async def _fetch_agent_manifest(client: httpx.AsyncClient, url: str) -> dict:
+    """Pull one sidecar's /agent. GET /agent never wakes a model, so expanding is
+    cheap and safe. Returns an `unavailable` stub if the sidecar is down/cold."""
+    try:
+        r = await client.get(url, timeout=3)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"unavailable": f"{type(e).__name__} — could not fetch {url} (sidecar down?)"}
+
 @app.get("/agent")
-def agent():
+async def agent(expand: bool = False):
     """Hub-wide self-describing manifest. An agent fetches THIS ONE route to
     discover all of Atelier: the live state, the control plane, and every
     sidecar — then drills into each sidecar's own GET /agent for method-level
-    detail. The single entry point for 'how do I use Atelier?'."""
+    detail. The single entry point for 'how do I use Atelier?'.
+
+    Add ?expand=true to inline EVERY sidecar's full /agent manifest in this one
+    response (concurrent fan-out) — one round-trip, no follow-up fetches."""
     sidecars = {}
     for name, base in SIDECAR_BASE.items():
         sidecars[name] = {
@@ -532,17 +545,29 @@ def agent():
             "readyz": f"{base}/readyz",
             "agent": f"{base}/agent" if name in AGENT_CAPABLE else None,
         }
+    if expand:
+        token = os.environ.get("HUB_TOKEN")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        capable = [(n, SIDECAR_BASE[n]) for n in SIDECAR_BASE if n in AGENT_CAPABLE]
+        async with httpx.AsyncClient(headers=headers) as client:
+            manifests = await asyncio.gather(
+                *[_fetch_agent_manifest(client, f"{b}/agent") for _, b in capable]
+            )
+        for (n, _), manifest in zip(capable, manifests):
+            sidecars[n]["manifest"] = manifest
     return {
         "service": "atelier-governor",
         "role": "hub supervisor — memory governor, telemetry, ETA predictor",
         "summary": "One LAN inference hub on a Mac Studio. The governor watches "
                    "unified-memory pressure across Ollama + sidecars, evicts idle "
                    "models to make room, records every run, and predicts ETAs.",
+        "tip": "GET /agent?expand=true to inline every sidecar's full manifest in "
+               "one fetch (no follow-up calls).",
         "how_to_start": (
-            "1) GET /pressure — see what's loaded, memory level, and per-tenant "
+            "1) GET /agent?expand=true — one round-trip gives you the whole hub: "
+            "control plane + every sidecar's full method list.\n"
+            "2) GET /pressure — see what's loaded, memory level, and per-tenant "
             "state (busy/idle/cold) right now.\n"
-            "2) For each sidecar below, GET its `agent` route (if present) to learn "
-            "its methods/params, or `readyz` for live status.\n"
             "3) Before a heavy job, check /pressure.level; if 'alarm', POST "
             "/make-room to evict idle models. Use /estimate for an ETA first.\n"
             "4) After a run, POST /report so the predictor sharpens."
