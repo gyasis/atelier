@@ -580,3 +580,36 @@ Expecting value: line 1 column 1 (char 0)
 - Updated activeContext.md
 - Updated progress.md
 - Progress: 21/24 tasks complete
+
+
+### 2026-06-04T22:00:09+02:00 ToolFailure: Bash
+- Error: Exit code 1
+=== what is PID 46958? ===
+    PID  PPID  ELAPSED    RSS ARGS
+  46958     1 07:23:07  86656 /Users/gyasisutton/services/governor-sidecar/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8799
+=== its parent chain ===
+(eval):4: read-only variable: PPID
+### 2026-06-04T22:00:09+02:00 ToolFailure: Bash
+- Error: Exit code 1
+=== what is PID 46958? ===
+    PID  PPID  ELAPSED    RSS ARGS
+  46958     1 07:23:07  86656 /Users/gyasisutton/services/governor-sidecar/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8799
+=== its parent chain ===
+(eval):4: read-only variable: PPID
+2026-06-04T22:01:52+02:00 SessionStop
+2026-06-04T22:01:52+02:00 SessionStop
+
+
+### 2026-06-04 22:01:52 - Memory Sync
+### 2026-06-04 22:01:52 - Memory Sync
+- Updated activeContext.md
+- Updated activeContext.md
+- Updated progress.md
+- Updated progress.md
+- Progress: 21/24 tasks complete
+- Progress: 21/24 tasks complete
+
+### 2026-06-04 22:01:52 - Memory Sync
+- Updated activeContext.md
+- Updated progress.md
+- Progress: 21/24 tasks complete
