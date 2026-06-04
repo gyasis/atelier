@@ -435,6 +435,12 @@ async def _ollama_stats_watcher():
     except Exception:
         pass
 
+    # The probe itself is an /api/generate call, so it gets logged and would
+    # re-trigger this watcher every tick — a self-feedback loop that pins the
+    # model resident forever. Guard with a cooldown AND by consuming every call
+    # already seen (incl. our own probe) after probing.
+    PROBE_COOLDOWN = float(os.environ.get("ATELIER_PROBE_COOLDOWN", "60"))
+    last_probe_ts = 0.0
     async with httpx.AsyncClient() as client:
         while True:
             await asyncio.sleep(0.5)
@@ -443,8 +449,13 @@ async def _ollama_stats_watcher():
                 if _recent_calls:
                     latest = _recent_calls[-1]
                     call_ts = latest.get("ts", 0)
-                    if call_ts > last_call_ts and latest.get("status") == "200":
+                    mono = time.monotonic()
+                    # Cooldown breaks the runaway: at most one probe per window,
+                    # however many calls (real or self-induced) show up.
+                    if (call_ts > last_call_ts and latest.get("status") == "200"
+                            and mono - last_probe_ts >= PROBE_COOLDOWN):
                         last_call_ts = call_ts
+                        last_probe_ts = mono
                         # Find which model is/was loaded
                         ps = await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)
                         models = ps.json().get("models", [])
@@ -456,6 +467,10 @@ async def _ollama_stats_watcher():
                             json={"model": model_name, "prompt": "Hi", "stream": False,
                                   "options": {"num_predict": 8}, "keep_alive": "5m"},
                             timeout=30)
+                        # Consume EVERY call logged so far — including this probe's own
+                        # GIN line once it lands — so the probe can't re-trigger us.
+                        if _recent_calls:
+                            last_call_ts = max(c.get("ts", 0) for c in _recent_calls)
                         if probe.status_code == 200:
                             d = probe.json()
                             ec = d.get("eval_count", 0)
