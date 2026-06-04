@@ -146,6 +146,24 @@ def _mlx_clear_cache() -> None:
         pass
 
 
+def _gpu_mem_gb() -> float | None:
+    """Real resident model memory (GB) from MLX's Metal allocator — accurate on
+    Apple Silicon UMA where ps RSS undercounts wired GPU memory. active + cache =
+    what this process actually holds; ~0 once the model idle-unloads. The APIs
+    moved between MLX releases (mx.metal.* → mx.*), so probe both."""
+    try:
+        import mlx.core as mx
+        metal = getattr(mx, "metal", None)
+        get_active = getattr(mx, "get_active_memory", None) or getattr(metal, "get_active_memory", None)
+        get_cache = getattr(mx, "get_cache_memory", None) or getattr(metal, "get_cache_memory", None)
+        if get_active is None:
+            return None
+        total = get_active() + (get_cache() if get_cache else 0)
+        return round(total / 1e9, 2)
+    except Exception:
+        return None
+
+
 async def _load_and_warm(repo: str = DEFAULT_MODEL) -> None:
     """Cold-load `repo` into mlx-whisper's loader cache + warm it. Idempotent
     for the same repo. Caller must hold _sem."""
