@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>FASTMLX_BIN</key>
+		<string>/Users/gyasisutton/services/fastmlx-sidecar/.venv/bin/fastmlx</string>
+		<key>FASTMLX_CHILD_PORT</key>
+		<string>18772</string>
+		<key>FASTMLX_PORT</key>
+		<string>8772</string>
+		<key>FASTMLX_DEFAULT_MODEL</key>
+		<string>mlx-community/Llama-3.1-8B-Instruct-4bit</string>
+		<key>IDLE_UNLOAD_SECONDS</key>
+		<string>600</string>
+		<key>HF_HOME</key>
+		<string>/Users/gyasisutton/models/hf-cache</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/fastmlx-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.fastmlx</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/fastmlx-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8772</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/fastmlx-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/fastmlx-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/fastmlx-sidecar</string>
+</dict>
+</plist>

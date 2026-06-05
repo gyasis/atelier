@@ -65,6 +65,8 @@ export async function fetchSidecars() {
     kokoro:    { lifecycle: 'running', active_jobs: 0, queue_depth: 0 },
     whisper:   { lifecycle: 'idle',    active_jobs: 0, queue_depth: 0 },
     dia:       { lifecycle: 'stopped', active_jobs: 0, queue_depth: 0 },
+    llamacpp:  { lifecycle: 'cold',    active_jobs: 0, queue_depth: 0 },
+    fastmlx:   { lifecycle: 'cold',    active_jobs: 0, queue_depth: 0 },
     comfyui:   { lifecycle: 'running', active_jobs: 1, queue_depth: 2 },
     ollama:    { models: [{ name: 'qwen3:32b', size: 20000000000 }] },
   };

@@ -60,6 +60,8 @@ SIDECAR_BASE = {
     "kokoro": "http://127.0.0.1:8765",
     "dia": "http://127.0.0.1:8769",
     "whisper": "http://127.0.0.1:8766",
+    "llamacpp": "http://127.0.0.1:8771",
+    "fastmlx": "http://127.0.0.1:8772",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -74,6 +76,8 @@ SIDECAR_LABELS = {
     "kokoro": "io.macstudio.hub.kokoro",
     "dia": "io.macstudio.hub.dia",
     "whisper": "io.macstudio.hub.whisper",
+    "llamacpp": "io.macstudio.hub.llamacpp",
+    "fastmlx": "io.macstudio.hub.fastmlx",
 }
 
 _state = {
@@ -530,8 +534,10 @@ SIDECAR_ROLES = {
     "kokoro": "TTS — fast, fixed voices (fallback)",
     "dia": "TTS — expressive voice cloning (batch)",
     "whisper": "ASR — speech-to-text, + optional LLM structure/summarize",
+    "llamacpp": "LLM — llama.cpp/llama-server (Metal, GGUF), OpenAI-compatible",
+    "fastmlx": "LLM/VLM — FastMLX (MLX-native), OpenAI-compatible",
 }
-AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia"}
+AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx"}
 
 async def _fetch_agent_manifest(client: httpx.AsyncClient, url: str) -> dict:
     """Pull one sidecar's /agent. GET /agent never wakes a model, so expanding is

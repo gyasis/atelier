@@ -47,6 +47,8 @@ decision below exists to respect that ceiling.
 | Medium | Service | Port | Engine | Role | Notes |
 |---|---|---|---|---|---|
 | **Text / LLM** | Ollama | 11434 | gemma / qwen3:32b / … | script-gen, chat | co-resident, managed outside Atelier |
+| **Text / LLM** | llama.cpp | 8771 | GGUF (Metal) via `llama-server` | OpenAI-compatible LLM | managed wrapper; cold-start + idle-unload; scaffolded |
+| **Text / LLM** | FastMLX | 8772 | `mlx-community` (MLX) | OpenAI-compatible LLM/VLM, MLX-native | managed wrapper; lazy model load + idle-unload; scaffolded |
 | **Embeddings** | Ollama | 11434 | `nomic-embed-text` | retrieval | via Ollama |
 | **Audio · TTS** | **OmniVoice** | **8770** | k2-fsa/OmniVoice (Diffusion LM, PyTorch MPS) | **PRIMARY** — instruct-driven accent / pitch / gender | ~0.6–1× RTF; the natural-voice engine |
 | **Audio · TTS** | Kokoro | 8765 | kokoro-onnx (CoreML/MPS) | fallback — fast, fixed voices | ~0.6 s/line; Mac-offline resilience twin on Linux `:18765` |

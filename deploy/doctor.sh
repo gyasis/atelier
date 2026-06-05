@@ -29,6 +29,8 @@ port_for() {
     whisper)   echo 8766 ;;
     dia)       echo 8769 ;;
     omnivoice) echo 8770 ;;
+    llamacpp)  echo 8771 ;;
+    fastmlx)   echo 8772 ;;
     governor)  echo 8799 ;;
     comfyui)   echo 8188 ;;
     *)         echo "" ;;

@@ -105,6 +105,9 @@ Reserved range: `8760-8799`. Currently:
 | 8767 | mflux-sidecar (Flux via MLX, optional) |
 | 8768 | _reserved for future RAG sidecar_ |
 | 8769 | voice-clone-sidecar (F5-TTS / CosyVoice 2 / Fish Speech) |
+| 8770 | omnivoice-sidecar (primary TTS) |
+| 8771 | llamacpp-sidecar (LLM, llama.cpp/llama-server; child on 18771) |
+| 8772 | fastmlx-sidecar (LLM/VLM, FastMLX/MLX; child on 18772) |
 | 8188 | ComfyUI (its own default port; not in 87xx range to match upstream convention) |
 | 11434 | Ollama (its own default; not changing) |
 | 9100 | hub-supervisor (v2) |

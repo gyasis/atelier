@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>LLAMACPP_BIN</key>
+		<string>/opt/homebrew/bin/llama-server</string>
+		<key>LLAMACPP_MODEL</key>
+		<string>/Users/gyasisutton/models/gguf/model.gguf</string>
+		<key>LLAMACPP_CHILD_PORT</key>
+		<string>18771</string>
+		<key>LLAMACPP_ARGS</key>
+		<string>--ctx-size 8192 -ngl 99 --flash-attn</string>
+		<key>LLAMACPP_PORT</key>
+		<string>8771</string>
+		<key>IDLE_UNLOAD_SECONDS</key>
+		<string>600</string>
+		<key>HF_HOME</key>
+		<string>/Users/gyasisutton/models/hf-cache</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/llamacpp-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.llamacpp</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/llamacpp-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8771</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/llamacpp-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/llamacpp-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/llamacpp-sidecar</string>
+</dict>
+</plist>
