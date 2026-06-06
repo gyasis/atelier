@@ -897,6 +897,7 @@ setInterval(refreshAll, 2500);
   const cellH = () => Math.max(40, Math.floor((window.innerHeight - (ROWS + 1) * MARGIN) / ROWS));
   const grid = GridStack.init({
     column: 12,
+    maxRow: ROWS,            // HARD CAP: the grid can never exceed the viewport's rows
     cellHeight: cellH(),
     margin: MARGIN,
     float: false,            // gravity: panels compact up so rows fill (no gaps)
@@ -939,24 +940,30 @@ setInterval(refreshAll, 2500);
 
   // Row-linked height: resizing a panel's height resizes its row-mates (same row,
   // i.e. same top edge) to match — so a row resizes as a unit. Width stays per-panel.
-  let _startH = null;
-  grid.on('resizestart', (e, el) => { _startH = el.gridstackNode.h; });
+  const MIN_ROW = 2;       // a row can't collapse below this many cells
+  let _startH = null, _bands = null, _resizedBand = null;
+  grid.on('resizestart', (e, el) => {
+    _startH = el.gridstackNode.h;
+    // snapshot each panel's row band (top vs bottom) BEFORE the drag shifts things
+    _bands = new Map();
+    grid.getGridItems().forEach(it => _bands.set(it, it.gridstackNode.y === 0 ? 'top' : 'bottom'));
+    _resizedBand = el.gridstackNode.y === 0 ? 'top' : 'bottom';
+  });
   grid.on('resizestop', (e, el) => {
-    const n = el.gridstackNode;
-    if (_startH != null && n.h !== _startH) {
-      const newH = n.h, rowY = n.y, startH = _startH;
-      // Reset the resized panel then set the WHOLE row in one batch, so all
-      // row-mates transition to the new height together (gridstack drops the
-      // last column if the resized panel grows before the batch). float:false
-      // then pushes the rows below down uniformly.
+    if (_startH != null && _bands && el.gridstackNode.h !== _startH) {
+      // Complementary fill: top + bottom always sum to ROWS, so the layout can
+      // NEVER exceed the viewport — growing one row shrinks the other.
+      let newH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, el.gridstackNode.h));
+      const topH = (_resizedBand === 'top') ? newH : (ROWS - newH);
+      const botH = ROWS - topH;
       grid.batchUpdate();
-      grid.update(el, { h: startH });
-      grid.getGridItems().forEach(other => {
-        if (other.gridstackNode.y === rowY) grid.update(other, { h: newH });
+      grid.getGridItems().forEach(it => {
+        if (_bands.get(it) === 'top') grid.update(it, { y: 0, h: topH });
+        else grid.update(it, { y: topH, h: botH });
       });
       grid.batchUpdate(false);
     }
-    _startH = null;
+    _startH = null; _bands = null;
     resizeCharts(el);
     saveLayout();
   });
