@@ -999,6 +999,42 @@ setInterval(refreshAll, 2500);
     resizeCharts(el);
     saveLayout();
   });
+
+  // ---- Move = SWAP (region-aware) -------------------------------------------
+  // Grabbing the panel BODY/HEADER to move it onto another panel SWAPS their grid
+  // slots (they exchange x/y/w/h). No pushing → the tiling stays intact and can
+  // never overflow. (Edge/corner drags are resize → complementary fill, above.)
+  let _homeSlots = null, _dragId = null;
+  grid.on('dragstart', (e, el) => {
+    _homeSlots = new Map();
+    grid.getGridItems().forEach(it => {
+      const o = it.gridstackNode;
+      _homeSlots.set(it.getAttribute('gs-id'), { x: o.x, y: o.y, w: o.w, h: o.h });
+    });
+    _dragId = el.getAttribute('gs-id');
+  });
+  grid.on('dragstop', (e, el) => {
+    if (_homeSlots && _dragId) {
+      const d = el.gridstackNode;
+      const cx = d.x + d.w / 2, cy = d.y + d.h / 2;   // center of where it was dropped
+      let targetId = null;                            // the slot it landed on
+      for (const [id, s] of _homeSlots) {
+        if (id === _dragId) continue;
+        if (cx >= s.x && cx < s.x + s.w && cy >= s.y && cy < s.y + s.h) { targetId = id; break; }
+      }
+      const home = _homeSlots.get(_dragId);
+      const layout = [];
+      _homeSlots.forEach((s, id) => {
+        if (targetId && id === _dragId) layout.push({ id, ..._homeSlots.get(targetId) }); // dragged → target slot
+        else if (targetId && id === targetId) layout.push({ id, ...home });                // target → dragged's slot
+        else layout.push({ id, ...s });                                                    // everyone else stays
+      });
+      grid.load(layout);   // (no target found → all homes restored = snap back)
+    }
+    _homeSlots = null; _dragId = null;
+    resizeCharts(); saveLayout();
+  });
+
   grid.on('change', () => { resizeCharts(); saveLayout(); });
 
   // toolbar: Edit/Lock + Reset
