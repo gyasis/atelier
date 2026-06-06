@@ -721,7 +721,7 @@ async function refreshAll() {
   const govTenants = pressure?.tenants ?? [];
 
   // Enrich atelier sidecars with known mem footprint when warm/busy
-  const enriched = govTenants.map(t => ({
+  let enriched = govTenants.map(t => ({
     ...t,
     mem_gb: t.mem_gb ?? (t.state !== 'cold' ? (SIDECAR_MEM[t.name] ?? 0) : 0),
   }));
@@ -741,6 +741,18 @@ async function refreshAll() {
       active_jobs: 0, queue_depth: 0, mem_gb: 0,
       subtitle: 'no model loaded',
     });
+  }
+
+  // Dedupe by name: the governor's /pressure tenants AND the /api/ps fetch can
+  // both list the same Ollama model, which doubled it in the donut + tenant grid.
+  // Keep the richer entry (the one that actually reports memory).
+  {
+    const byName = new Map();
+    for (const t of enriched) {
+      const ex = byName.get(t.name);
+      if (!ex || (t.mem_gb || 0) > (ex.mem_gb || 0)) byName.set(t.name, { ...ex, ...t });
+    }
+    enriched = [...byName.values()];
   }
 
   // -- Tenant cards (fully dynamic) --
