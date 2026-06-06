@@ -905,21 +905,18 @@ setInterval(refreshAll, 2500);
 // ---- Gridstack movable-panel workspace (drag/resize/persist) ----
 (function initLayout() {
   if (typeof GridStack === 'undefined') return;   // graceful if vendor missing
-  const LS_KEY = 'atelier.layout.v2';   // v2: clean 3x2 default
-  const ROWS = 12, MARGIN = 4;          // 6-row panels × 2 = 12 rows fill the viewport
+  const LS_KEY = 'atelier.layout.v3';   // v3: model-based (own source of truth)
+  const COLS = 12, ROWS = 12, MARGIN = 4, MIN_COL = 2, MIN_ROW = 2;
   const cellH = () => Math.max(40, Math.floor((window.innerHeight - (ROWS + 1) * MARGIN) / ROWS));
   const grid = GridStack.init({
-    column: 12,
-    maxRow: ROWS,            // HARD CAP: the grid can never exceed the viewport's rows
-    cellHeight: cellH(),
-    margin: MARGIN,
-    float: false,            // gravity: panels compact up so rows fill (no gaps)
-    staticGrid: true,        // start LOCKED — viewing won't drag panels
-    handle: '.phead',        // drag a panel by its header (titlebar feel)
-    resizable: { handles: 'n,e,s,w,se,sw,ne,nw' },   // grab any edge/corner
+    column: COLS, maxRow: ROWS, cellHeight: cellH(), margin: MARGIN,
+    float: true,             // WE place every panel via render(); gridstack never auto-arranges
+    staticGrid: true,        // start LOCKED
+    handle: '.phead',        // move a panel by its header
   });
+  grid.enableResize(false);  // resize is driven by our seam gutters, not gridstack handles
 
-  // affordances: a grip in each header + min-size so tiles can't collapse
+  // affordances: grip in each header + edit hint
   document.querySelectorAll('.grid-stack-item').forEach(it => {
     const head = it.querySelector('.phead');
     if (head && !head.querySelector('.grip')) {
@@ -927,172 +924,109 @@ setInterval(refreshAll, 2500);
       g.className = 'grip'; g.textContent = '⠿'; g.title = 'drag to move';
       head.insertBefore(g, head.firstChild);
     }
-    grid.update(it, { minW: 3, minH: 3 });
   });
-
-  // edit-mode hint banner
   const hint = document.createElement('div');
   hint.className = 'edit-hint';
-  hint.textContent = 'Edit mode — drag a panel by its header (⠿) to move · drag any edge/corner to resize · click Lock when done';
+  hint.textContent = 'Edit mode — drag a header (⠿) onto a panel to SWAP or onto its edge to INSERT between · drag a seam to resize · Lock when done';
   document.body.appendChild(hint);
+
+  const PANEL_IDS = [...document.querySelectorAll('.grid-stack-item')].map(it => it.getAttribute('gs-id'));
+  const gsEl = document.querySelector('.grid-stack');
+
+  // ===== layout MODEL = single source of truth =====
+  // M.rows: [{ h, cols:[{id,w}] }]  — sum(cols.w)=COLS per row, sum(rows.h)=ROWS
+  function defaultModel() {
+    return { rows: [
+      { h: 6, cols: [{ id: 'memory-panel', w: 4 }, { id: 'tenants-panel', w: 4 }, { id: 'tasks-panel', w: 4 }] },
+      { h: 6, cols: [{ id: 'hud-pie', w: 4 }, { id: 'hud-lines', w: 4 }, { id: 'hud-status', w: 4 }] },
+    ] };
+  }
+  function validModel(m) {
+    if (!m || !Array.isArray(m.rows) || m.rows.length < 1) return false;
+    const ids = m.rows.flatMap(r => (r.cols || []).map(c => c.id));
+    return ids.length === PANEL_IDS.length && PANEL_IDS.every(id => ids.includes(id));
+  }
+  let M = defaultModel();
+  try { const s = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); if (validModel(s)) M = s; } catch (_) {}
 
   const resizeCharts = (el) =>
     (el ? [el] : document.querySelectorAll('.grid-stack-item')).forEach(it =>
       it.querySelectorAll('canvas').forEach(c => window.Chart?.getChart?.(c)?.resize()));
-  const saveLayout = () => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(grid.save(false))); } catch {}
-  };
-  const fitHeight = () => grid.cellHeight(cellH());   // 12 rows fill the window exactly
-  window.addEventListener('resize', () => { fitHeight(); resizeCharts(); });
+  const saveModel = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(M)); } catch (_) {} };
 
-  // restore a saved arrangement
-  try {
-    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
-    if (Array.isArray(saved) && saved.length) grid.load(saved);
-  } catch {}
-
-  // Row-linked height: resizing a panel's height resizes its row-mates (same row,
-  // i.e. same top edge) to match — so a row resizes as a unit. Width stays per-panel.
-  // ---- Sizing limits (tunable). Both axes always fill the viewport exactly. ----
-  const COLS = 12, MIN_COL = 2, MIN_ROW = 2;
-  let _start = null, _bands = null, _resizedBand = null, _rowOrder = null;
-  grid.on('resizestart', (e, el) => {
-    const n = el.gridstackNode;
-    _start = { w: n.w, h: n.h };
-    // snapshot bands + the resized row's left-to-right order BEFORE the drag reflows
-    _bands = new Map();
-    grid.getGridItems().forEach(it => _bands.set(it, it.gridstackNode.y === 0 ? 'top' : 'bottom'));
-    _resizedBand = _bands.get(el);
-    _rowOrder = grid.getGridItems().filter(it => _bands.get(it) === _resizedBand)
-                    .sort((a, b) => a.gridstackNode.x - b.gridstackNode.x);
-  });
-  grid.on('resizestop', (e, el) => {
-    const n = el.gridstackNode;
-    const hChanged = _start && n.h !== _start.h;
-    const wChanged = _start && n.w !== _start.w;
-    if (hChanged || wChanged) {
-      // HEIGHT — complementary rows (top + bottom = ROWS). Keep current split if
-      // only width changed.
-      let topH;
-      if (hChanged) {
-        const newH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, n.h));
-        topH = (_resizedBand === 'top') ? newH : (ROWS - newH);
-      } else {
-        const t = grid.getGridItems().find(it => _bands.get(it) === 'top');
-        topH = t ? t.gridstackNode.h : Math.round(ROWS / 2);
-      }
-      // WIDTH — re-tile the resized row: leftover split EQUALLY among siblings,
-      // each >= MIN_COL, row re-tiled left-to-right to exactly COLS.
-      const widthPlan = new Map();
-      if (wChanged && _rowOrder && _rowOrder.length > 1) {
-        const k = _rowOrder.length - 1;
-        const maxW = COLS - k * MIN_COL;           // leaves every sibling >= MIN_COL
-        const newW = Math.max(MIN_COL, Math.min(maxW, n.w));
-        let leftover = COLS - newW, base = Math.floor(leftover / k), rem = leftover - base * k, x = 0;
-        _rowOrder.forEach(it => {
-          let w;
-          if (it === el) w = newW;
-          else { w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; }
-          widthPlan.set(it, { x, w }); x += w;
-        });
-      }
-      // Build the COMPLETE target layout and apply atomically — gridstack's
-      // incremental collision engine scrambles the last column otherwise.
-      const layout = grid.getGridItems().map(it => {
-        const o = it.gridstackNode, band = _bands.get(it);
-        const y = (band === 'top') ? 0 : topH;
-        const h = (band === 'top') ? topH : (ROWS - topH);
-        let x = o.x, w = o.w;
-        if (widthPlan.has(it)) { x = widthPlan.get(it).x; w = widthPlan.get(it).w; }
-        return { id: it.getAttribute('gs-id'), x, y, w, h };
-      });
-      grid.load(layout);
-    }
-    _start = null; _bands = null; _rowOrder = null;
-    resizeCharts(el);
-    saveLayout();
-  });
-
-  // ---- Move = SWAP (region-aware) -------------------------------------------
-  // Grabbing the panel BODY/HEADER to move it onto another panel SWAPS their grid
-  // slots (they exchange x/y/w/h). No pushing → the tiling stays intact and can
-  // never overflow. (Edge/corner drags are resize → complementary fill, above.)
-  let _homeSlots = null, _dragId = null;
-  grid.on('dragstart', (e, el) => {
-    _homeSlots = new Map();
-    grid.getGridItems().forEach(it => {
-      const o = it.gridstackNode;
-      _homeSlots.set(it.getAttribute('gs-id'), { x: o.x, y: o.y, w: o.w, h: o.h });
+  // make every row sum to COLS and the rows sum to ROWS (equalize anything off / w:0)
+  function normalize() {
+    M.rows = M.rows.filter(r => r.cols && r.cols.length);   // drop empty rows
+    if (!M.rows.length) M = defaultModel();
+    const nR = M.rows.length;
+    let hbase = Math.floor(ROWS / nR), hrem = ROWS - hbase * nR;
+    M.rows.forEach(r => {
+      const hsum = r.h || 0;
+      if (M.rows.length !== 2 || hsum < MIN_ROW || hsum > ROWS - MIN_ROW) { r.h = hbase + (hrem > 0 ? 1 : 0); if (hrem > 0) hrem--; }
     });
-    _dragId = el.getAttribute('gs-id');
-  });
-  grid.on('dragstop', (e, el) => {
-    if (_homeSlots && _dragId) {
-      const d = el.gridstackNode;
-      const cx = d.x + d.w / 2, cy = d.y + d.h / 2;   // center of where it was dropped
-      let targetId = null;                            // the slot it landed on
-      for (const [id, s] of _homeSlots) {
-        if (id === _dragId) continue;
-        if (cx >= s.x && cx < s.x + s.w && cy >= s.y && cy < s.y + s.h) { targetId = id; break; }
+    let totH = M.rows.reduce((s, r) => s + r.h, 0);
+    if (totH !== ROWS) M.rows[M.rows.length - 1].h += (ROWS - totH);
+    M.rows.forEach(r => {
+      const n = r.cols.length;
+      const wsum = r.cols.reduce((s, c) => s + (c.w || 0), 0);
+      if (wsum !== COLS || r.cols.some(c => !c.w || c.w < MIN_COL)) {
+        const base = Math.floor(COLS / n); let rem = COLS - base * n;
+        r.cols.forEach(c => { c.w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; });
       }
-      const home = _homeSlots.get(_dragId);
-      const layout = [];
-      _homeSlots.forEach((s, id) => {
-        if (targetId && id === _dragId) layout.push({ id, ..._homeSlots.get(targetId) }); // dragged → target slot
-        else if (targetId && id === targetId) layout.push({ id, ...home });                // target → dragged's slot
-        else layout.push({ id, ...s });                                                    // everyone else stays
-      });
-      grid.load(layout);   // (no target found → all homes restored = snap back)
+    });
+  }
+
+  let _busy = false;
+  function render() {
+    normalize();
+    const layout = []; let y = 0;
+    M.rows.forEach(r => { let x = 0; r.cols.forEach(c => { layout.push({ id: c.id, x, y, w: c.w, h: r.h }); x += c.w; }); y += r.h; });
+    _busy = true; grid.load(layout); _busy = false;
+    saveModel();
+    requestAnimationFrame(() => { resizeCharts(); rebuildGutters(); });
+  }
+
+  function findCell(id) {
+    for (let ri = 0; ri < M.rows.length; ri++) { const ci = M.rows[ri].cols.findIndex(c => c.id === id); if (ci >= 0) return { ri, ci }; }
+    return null;
+  }
+
+  // ===== resize =====
+  function widthResize(ri, ci, startW, dCols) {
+    const row = M.rows[ri]; const k = row.cols.length - 1; if (k < 1) return;
+    const maxW = COLS - k * MIN_COL;
+    const newW = Math.max(MIN_COL, Math.min(maxW, startW + dCols));
+    let leftover = COLS - newW, base = Math.floor(leftover / k), rem = leftover - base * k;
+    row.cols.forEach((c, i) => { if (i === ci) c.w = newW; else { c.w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; } });
+    render();
+  }
+  function heightResize(startTopH, dRows) {
+    if (M.rows.length < 2) return;
+    const topH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, startTopH + dRows));
+    M.rows[0].h = topH; M.rows[1].h = ROWS - topH;
+    render();
+  }
+
+  // ===== move: swap (drop on panel center) or insert (drop near an edge) =====
+  function moveTo(dragId, targetRi, targetCi, mode) {
+    const a = findCell(dragId); if (!a) return;
+    if (mode === 'swap') {
+      const ca = M.rows[a.ri].cols[a.ci], cb = M.rows[targetRi].cols[targetCi];
+      if (!cb || ca === cb) return;
+      const tmp = ca.id; ca.id = cb.id; cb.id = tmp;          // swap ids, keep slot widths
+    } else { // insert
+      const [cell] = M.rows[a.ri].cols.splice(a.ci, 1);
+      let tci = targetCi;
+      if (a.ri === targetRi && a.ci < targetCi) tci--;        // removal shifted target
+      M.rows[targetRi].cols.splice(tci, 0, { id: cell.id, w: 0 }); // w normalized to equal
     }
-    _homeSlots = null; _dragId = null;
-    resizeCharts(); saveLayout(); rebuildGutters();
-  });
+    render();
+  }
 
-  grid.on('change', () => { resizeCharts(); saveLayout(); });
-
-  // ---- Seam gutters: drag the BORDER between panels to resize -----------------
-  // gridstack's own resize is off; resize is driven by gutters on the seams.
-  // Vertical seam → resize the panel on its LEFT; the rest of that row redistribute
-  // to EQUAL widths. Horizontal seam → top/bottom rows trade height. Always fills.
-  grid.enableResize(false);
-  const gsEl = document.querySelector('.grid-stack');
+  // ===== seam gutters (computed from the model) =====
   const gutterOverlay = document.createElement('div');
   gutterOverlay.className = 'gutter-overlay';
   gsEl.appendChild(gutterOverlay);
-
-  function rowsByBand() {
-    const map = new Map();
-    grid.getGridItems().forEach(it => {
-      const y = it.gridstackNode.y;
-      if (!map.has(y)) map.set(y, []);
-      map.get(y).push(it);
-    });
-    for (const arr of map.values()) arr.sort((a, b) => a.gridstackNode.x - b.gridstackNode.x);
-    return map;
-  }
-
-  function applyWidthResize(leftId, rowY, dCols, startNodes) {
-    const rowIds = startNodes.filter(n => n.y === rowY).sort((a, b) => a.x - b.x).map(n => n.id);
-    const k = rowIds.length - 1; if (k < 1) return;
-    const startW = startNodes.find(n => n.id === leftId).w;
-    const maxW = COLS - k * MIN_COL;
-    const newW = Math.max(MIN_COL, Math.min(maxW, startW + dCols));
-    let leftover = COLS - newW, base = Math.floor(leftover / k), rem = leftover - base * k, x = 0;
-    const wmap = new Map();
-    rowIds.forEach(id => {
-      let w; if (id === leftId) w = newW; else { w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; }
-      wmap.set(id, { x, w }); x += w;
-    });
-    grid.load(startNodes.map(n => wmap.has(n.id)
-      ? { id: n.id, x: wmap.get(n.id).x, y: n.y, w: wmap.get(n.id).w, h: n.h } : { ...n }));
-  }
-  function applyHeightResize(dRows, startNodes) {
-    const topStartH = (startNodes.find(n => n.y === 0) || { h: Math.round(ROWS / 2) }).h;
-    const topH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, topStartH + dRows));
-    grid.load(startNodes.map(n => n.y === 0
-      ? { id: n.id, x: n.x, y: 0, w: n.w, h: topH }
-      : { id: n.id, x: n.x, y: topH, w: n.w, h: ROWS - topH }));
-  }
 
   function attachGutterDrag(g) {
     g.addEventListener('pointerdown', (ev) => {
@@ -1100,85 +1034,104 @@ setInterval(refreshAll, 2500);
       g.classList.add('dragging');
       try { g.setPointerCapture(ev.pointerId); } catch (_) {}
       const rect = gsEl.getBoundingClientRect();
-      const cellW = rect.width / COLS, cellH = rect.height / ROWS;
+      const cellW = rect.width / COLS, cellHpx = rect.height / ROWS;
       const startX = ev.clientX, startY = ev.clientY;
-      const startNodes = grid.getGridItems().map(it => {
-        const o = it.gridstackNode;
-        return { id: it.getAttribute('gs-id'), x: o.x, y: o.y, w: o.w, h: o.h };
-      });
+      const sW = g._kind === 'v' ? M.rows[g._ri].cols[g._ci].w : 0;
+      const sTopH = M.rows[0] ? M.rows[0].h : 6;
+      let _raf = 0;
       const move = (e) => {
-        if (g._kind === 'v') {
-          g.style.left = (e.clientX - rect.left) + 'px';
-          applyWidthResize(g._leftId, g._rowY, Math.round((e.clientX - startX) / cellW), startNodes);
-        } else {
-          g.style.top = (e.clientY - rect.top) + 'px';
-          applyHeightResize(Math.round((e.clientY - startY) / cellH), startNodes);
-        }
+        if (_raf) return;
+        _raf = requestAnimationFrame(() => {
+          _raf = 0;
+          if (g._kind === 'v') widthResize(g._ri, g._ci, sW, Math.round((e.clientX - startX) / cellW));
+          else heightResize(sTopH, Math.round((e.clientY - startY) / cellHpx));
+        });
       };
       const up = () => {
         g.classList.remove('dragging');
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
-        saveLayout(); resizeCharts(); rebuildGutters();
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     });
   }
-
   function rebuildGutters() {
     gutterOverlay.innerHTML = '';
     if (!document.body.classList.contains('layout-edit')) return;
-    const rows = rowsByBand();
-    rows.forEach((row) => {
-      for (let i = 0; i < row.length - 1; i++) {
-        const left = row[i];
+    const items = {}; document.querySelectorAll('.grid-stack-item').forEach(it => items[it.getAttribute('gs-id')] = it);
+    let y = 0;
+    M.rows.forEach((r, ri) => {
+      for (let ci = 0; ci < r.cols.length - 1; ci++) {
+        const leftEl = items[r.cols[ci].id]; if (!leftEl) continue;
         const g = document.createElement('div');
         g.className = 'gutter gutter-v';
-        g.style.left = (left.offsetLeft + left.offsetWidth) + 'px';
-        g.style.top = left.offsetTop + 'px';
-        g.style.height = left.offsetHeight + 'px';
-        g._kind = 'v'; g._leftId = left.getAttribute('gs-id'); g._rowY = left.gridstackNode.y;
+        g.style.left = (leftEl.offsetLeft + leftEl.offsetWidth) + 'px';
+        g.style.top = leftEl.offsetTop + 'px';
+        g.style.height = leftEl.offsetHeight + 'px';
+        g._kind = 'v'; g._ri = ri; g._ci = ci;
         gutterOverlay.appendChild(g); attachGutterDrag(g);
       }
     });
-    const ys = [...rows.keys()].sort((a, b) => a - b);
-    if (ys.length >= 2) {
-      const ref = rows.get(ys[0])[0];
-      const g = document.createElement('div');
-      g.className = 'gutter gutter-h';
-      g.style.top = (ref.offsetTop + ref.offsetHeight) + 'px';
-      g.style.left = '0'; g.style.width = '100%';
-      g._kind = 'h';
-      gutterOverlay.appendChild(g); attachGutterDrag(g);
+    if (M.rows.length >= 2) {
+      const ref = items[M.rows[0].cols[0].id];
+      if (ref) {
+        const g = document.createElement('div');
+        g.className = 'gutter gutter-h';
+        g.style.top = (ref.offsetTop + ref.offsetHeight) + 'px';
+        g.style.left = '0'; g.style.width = '100%';
+        g._kind = 'h';
+        gutterOverlay.appendChild(g); attachGutterDrag(g);
+      }
     }
   }
-  window.addEventListener('resize', () => requestAnimationFrame(rebuildGutters));
 
-  // toolbar: Edit/Lock + Reset
-  const bar = document.createElement('div');
-  bar.className = 'layout-bar';
-  const editBtn = document.createElement('button');
-  editBtn.textContent = '✎ Edit Layout';
-  const resetBtn = document.createElement('button');
-  resetBtn.textContent = '⟲ Reset';
-  bar.append(editBtn, resetBtn);
-  document.body.appendChild(bar);
+  // ===== move via header drag: decide swap vs insert on drop =====
+  let _dragId = null;
+  grid.on('dragstart', (e, el) => { _dragId = el.getAttribute('gs-id'); });
+  grid.on('dragstop', (e, el) => {
+    if (_dragId && !_busy) {
+      const d = el.gridstackNode;
+      const cx = d.x + d.w / 2, cy = d.y + d.h / 2;        // drop center (grid units)
+      // which row band?  (cumulative heights)
+      let yy = 0, targetRi = -1;
+      for (let ri = 0; ri < M.rows.length; ri++) { if (cy >= yy && cy < yy + M.rows[ri].h) { targetRi = ri; break; } yy += M.rows[ri].h; }
+      if (targetRi >= 0) {
+        const row = M.rows[targetRi];
+        let xx = 0, overCi = -1;
+        for (let ci = 0; ci < row.cols.length; ci++) { if (cx >= xx && cx < xx + row.cols[ci].w) { overCi = ci; break; } xx += row.cols[ci].w; }
+        if (overCi >= 0 && row.cols[overCi].id !== _dragId) {
+          const cw = row.cols[overCi].w, rel = (cx - xx) / cw;   // 0..1 across the target cell
+          if (rel < 0.34) moveTo(_dragId, targetRi, overCi, 'insert');        // left edge → insert before
+          else if (rel > 0.66) moveTo(_dragId, targetRi, overCi + 1, 'insert'); // right edge → insert after
+          else moveTo(_dragId, targetRi, overCi, 'swap');                     // center → swap
+        } else { render(); }   // dropped on itself → snap back
+      } else { render(); }
+    }
+    _dragId = null;
+  });
 
+  // ===== toolbar: Edit / Lock / Reset =====
+  const bar = document.createElement('div'); bar.className = 'layout-bar';
+  const editBtn = document.createElement('button'); editBtn.textContent = '✎ Edit Layout';
+  const resetBtn = document.createElement('button'); resetBtn.textContent = '⟲ Reset';
+  bar.append(editBtn, resetBtn); document.body.appendChild(bar);
   let editing = false;
   editBtn.addEventListener('click', () => {
     editing = !editing;
     grid.setStatic(!editing);
-    if (editing) grid.enableResize(false);   // gutters drive resize, not gridstack handles
+    if (editing) grid.enableResize(false);
     document.body.classList.toggle('layout-edit', editing);
     editBtn.classList.toggle('active', editing);
     editBtn.textContent = editing ? '🔒 Lock Layout' : '✎ Edit Layout';
-    if (!editing) saveLayout();
-    resizeCharts();
-    rebuildGutters();
+    resizeCharts(); rebuildGutters();
   });
-  resetBtn.addEventListener('click', () => { localStorage.removeItem(LS_KEY); location.reload(); });
+  resetBtn.addEventListener('click', () => { M = defaultModel(); render(); });
 
+  const fitHeight = () => grid.cellHeight(cellH());
+  window.addEventListener('resize', () => { fitHeight(); resizeCharts(); requestAnimationFrame(rebuildGutters); });
+
+  render();                              // paint the model
   requestAnimationFrame(() => { fitHeight(); resizeCharts(); });
 })();
 
