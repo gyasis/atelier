@@ -86,6 +86,32 @@ pub async fn get_top_processes() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "processes": rows }))
 }
 
+/// Where the dashboard panel layout is persisted (survives app quit, unlike
+/// WKWebView localStorage which can live in an ephemeral store).
+fn layout_path() -> std::path::PathBuf {
+    let home = dirs_next::home_dir().unwrap_or_default();
+    home.join(".atelier").join("dashboard-layout.json")
+}
+
+/// Persist the panel layout (JSON string) to disk.
+#[tauri::command]
+pub async fn save_layout(data: String) -> Result<(), String> {
+    let p = layout_path();
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&p, data).map_err(|e| e.to_string())
+}
+
+/// Load the persisted panel layout (JSON string), or None if not saved yet.
+#[tauri::command]
+pub async fn load_layout() -> Result<Option<String>, String> {
+    match std::fs::read_to_string(layout_path()) {
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Resize the main window down to HUD card size.
 #[tauri::command]
 pub async fn resize_to_hud(app: tauri::AppHandle) -> Result<(), String> {

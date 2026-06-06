@@ -32,6 +32,8 @@ pub fn run() {
             commands::resize_to_hud,
             commands::resize_to_main,
             commands::toggle_hud_window,
+            commands::save_layout,
+            commands::load_layout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

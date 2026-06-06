@@ -952,7 +952,15 @@ setInterval(refreshAll, 2500);
   const resizeCharts = (el) =>
     (el ? [el] : document.querySelectorAll('.grid-stack-item')).forEach(it =>
       it.querySelectorAll('canvas').forEach(c => window.Chart?.getChart?.(c)?.resize()));
-  const saveModel = () => { try { localStorage.setItem(LS_KEY, JSON.stringify(M)); } catch (_) {} };
+  const tauriInvoke = (cmd, args) => {
+    const inv = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke ?? window.__TAURI_INTERNALS__?.invoke;
+    try { return inv ? inv(cmd, args) : null; } catch (_) { return null; }
+  };
+  const saveModel = () => {
+    const data = JSON.stringify(M);
+    try { localStorage.setItem(LS_KEY, data); } catch (_) {}   // fast path / browser preview
+    tauriInvoke('save_layout', { data });                      // DURABLE file (survives app quit)
+  };
 
   // make every row sum to COLS and the rows sum to ROWS (equalize anything off / w:0)
   function normalize() {
@@ -1131,7 +1139,15 @@ setInterval(refreshAll, 2500);
   const fitHeight = () => grid.cellHeight(cellH());
   window.addEventListener('resize', () => { fitHeight(); resizeCharts(); requestAnimationFrame(rebuildGutters); });
 
-  render();                              // paint the model
+  render();                              // instant paint from localStorage/default
+  // Durable restore: pull the saved layout from the on-disk file (survives quit)
+  // and re-render if it differs from what localStorage gave us.
+  (async () => {
+    try {
+      const data = await tauriInvoke('load_layout');
+      if (data) { const s = JSON.parse(data); if (validModel(s)) { M = s; render(); } }
+    } catch (_) {}
+  })();
   requestAnimationFrame(() => { fitHeight(); resizeCharts(); });
 })();
 
