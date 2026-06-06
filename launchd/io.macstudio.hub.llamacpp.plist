@@ -7,11 +7,13 @@
 		<key>LLAMACPP_BIN</key>
 		<string>/opt/homebrew/bin/llama-server</string>
 		<key>LLAMACPP_MODEL</key>
-		<string>/Users/gyasisutton/models/gguf/model.gguf</string>
+		<string>/Users/gyasisutton/.ollama/models/blobs/sha256-1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606</string>
+		<key>LLAMACPP_ALIAS</key>
+		<string>gemma4-12b</string>
 		<key>LLAMACPP_CHILD_PORT</key>
 		<string>18771</string>
 		<key>LLAMACPP_ARGS</key>
-		<string>--ctx-size 8192 -ngl 99 --flash-attn</string>
+		<string>--ctx-size 8192 -ngl 99 --jinja</string>
 		<key>LLAMACPP_PORT</key>
 		<string>8771</string>
 		<key>IDLE_UNLOAD_SECONDS</key>
