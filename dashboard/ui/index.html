@@ -310,6 +310,8 @@
   ::-webkit-scrollbar-track { background: transparent; }
   /* ---- Gridstack movable-panel workspace ---- */
   .grid-stack { background: var(--line); height: 100vh; width: 100vw; overflow: hidden; }
+  /* snap resizes instantly so charts read the final container size (no tween) */
+  .grid-stack-item, .grid-stack-item-content { transition: none !important; }
   .grid-stack-item-content {
     inset: 0; overflow: hidden; display: flex;
     background: var(--bg); border: 0;
@@ -913,6 +915,8 @@ setInterval(refreshAll, 2500);
   const grid = GridStack.init({
     column: COLS, maxRow: ROWS, cellHeight: cellH(), margin: MARGIN,
     float: true,             // WE place every panel via render(); gridstack never auto-arranges
+    animate: false,          // INSTANT resize — animation made charts read the old size mid-tween
+                             // ("only resizes on restart"), so panels snap to final size at once
     staticGrid: true,        // start LOCKED
     handle: '.phead',        // move a panel by its header
   });
@@ -994,6 +998,7 @@ setInterval(refreshAll, 2500);
     _busy = true; grid.load(layout); _busy = false;
     saveModel();
     requestAnimationFrame(() => { resizeCharts(); rebuildGutters(); });
+    setTimeout(() => { resizeCharts(); rebuildGutters(); }, 90);   // settle fallback
   }
 
   function findCell(id) {
