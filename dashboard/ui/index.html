@@ -940,30 +940,62 @@ setInterval(refreshAll, 2500);
 
   // Row-linked height: resizing a panel's height resizes its row-mates (same row,
   // i.e. same top edge) to match — so a row resizes as a unit. Width stays per-panel.
-  const MIN_ROW = 2;       // a row can't collapse below this many cells
-  let _startH = null, _bands = null, _resizedBand = null;
+  // ---- Sizing limits (tunable). Both axes always fill the viewport exactly. ----
+  const COLS = 12, MIN_COL = 2, MIN_ROW = 2;
+  let _start = null, _bands = null, _resizedBand = null, _rowOrder = null;
   grid.on('resizestart', (e, el) => {
-    _startH = el.gridstackNode.h;
-    // snapshot each panel's row band (top vs bottom) BEFORE the drag shifts things
+    const n = el.gridstackNode;
+    _start = { w: n.w, h: n.h };
+    // snapshot bands + the resized row's left-to-right order BEFORE the drag reflows
     _bands = new Map();
     grid.getGridItems().forEach(it => _bands.set(it, it.gridstackNode.y === 0 ? 'top' : 'bottom'));
-    _resizedBand = el.gridstackNode.y === 0 ? 'top' : 'bottom';
+    _resizedBand = _bands.get(el);
+    _rowOrder = grid.getGridItems().filter(it => _bands.get(it) === _resizedBand)
+                    .sort((a, b) => a.gridstackNode.x - b.gridstackNode.x);
   });
   grid.on('resizestop', (e, el) => {
-    if (_startH != null && _bands && el.gridstackNode.h !== _startH) {
-      // Complementary fill: top + bottom always sum to ROWS, so the layout can
-      // NEVER exceed the viewport — growing one row shrinks the other.
-      let newH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, el.gridstackNode.h));
-      const topH = (_resizedBand === 'top') ? newH : (ROWS - newH);
-      const botH = ROWS - topH;
-      grid.batchUpdate();
-      grid.getGridItems().forEach(it => {
-        if (_bands.get(it) === 'top') grid.update(it, { y: 0, h: topH });
-        else grid.update(it, { y: topH, h: botH });
+    const n = el.gridstackNode;
+    const hChanged = _start && n.h !== _start.h;
+    const wChanged = _start && n.w !== _start.w;
+    if (hChanged || wChanged) {
+      // HEIGHT — complementary rows (top + bottom = ROWS). Keep current split if
+      // only width changed.
+      let topH;
+      if (hChanged) {
+        const newH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, n.h));
+        topH = (_resizedBand === 'top') ? newH : (ROWS - newH);
+      } else {
+        const t = grid.getGridItems().find(it => _bands.get(it) === 'top');
+        topH = t ? t.gridstackNode.h : Math.round(ROWS / 2);
+      }
+      // WIDTH — re-tile the resized row: leftover split EQUALLY among siblings,
+      // each >= MIN_COL, row re-tiled left-to-right to exactly COLS.
+      const widthPlan = new Map();
+      if (wChanged && _rowOrder && _rowOrder.length > 1) {
+        const k = _rowOrder.length - 1;
+        const maxW = COLS - k * MIN_COL;           // leaves every sibling >= MIN_COL
+        const newW = Math.max(MIN_COL, Math.min(maxW, n.w));
+        let leftover = COLS - newW, base = Math.floor(leftover / k), rem = leftover - base * k, x = 0;
+        _rowOrder.forEach(it => {
+          let w;
+          if (it === el) w = newW;
+          else { w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; }
+          widthPlan.set(it, { x, w }); x += w;
+        });
+      }
+      // Build the COMPLETE target layout and apply atomically — gridstack's
+      // incremental collision engine scrambles the last column otherwise.
+      const layout = grid.getGridItems().map(it => {
+        const o = it.gridstackNode, band = _bands.get(it);
+        const y = (band === 'top') ? 0 : topH;
+        const h = (band === 'top') ? topH : (ROWS - topH);
+        let x = o.x, w = o.w;
+        if (widthPlan.has(it)) { x = widthPlan.get(it).x; w = widthPlan.get(it).w; }
+        return { id: it.getAttribute('gs-id'), x, y, w, h };
       });
-      grid.batchUpdate(false);
+      grid.load(layout);
     }
-    _startH = null; _bands = null;
+    _start = null; _bands = null; _rowOrder = null;
     resizeCharts(el);
     saveLayout();
   });
