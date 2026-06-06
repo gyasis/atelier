@@ -301,7 +301,9 @@
   .lg-row { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; }
   .lg-sw { width: 8px; height: 8px; flex: none; }
   .lg-row .gb { margin-left: auto; color: var(--text-2); }
-  .pie-flex { display: grid; grid-template-columns: 1fr 0.9fr; gap: 12px; flex:1 1 auto; min-height:0; align-items:center; }
+  .pie-flex { display: grid; grid-template-columns: 1fr 0.9fr; gap: 12px; flex:1 1 auto; min-height:0; align-items:stretch; }
+  .pie-flex > .mini-wrap { height: 100%; width: 100%; }   /* donut fills the panel, scales with it */
+  .pie-flex > .legend { align-self: center; }
 
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
