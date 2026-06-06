@@ -781,18 +781,21 @@ async function refreshAll() {
   // -- Pie chart (loaded now) — use enriched list with real mem_gb --
   const loaded = enriched.filter(t => t.mem_gb > 0);
   const pc = Chart.getChart('pieChart');
+  const PALETTE = ['#C8A96E','#6E86C8','#A98B5C','#5FA86B','#C99A52','#9B6EC8','#D9C091','#63A0A8'];
+  const FREE_COLOR = '#26251F';
   if (pc && loaded.length) {
     const gb = loaded.map(t => t.mem_gb);
-    const usedTotal = gb.reduce((a,b)=>a+b,0);
-    const free = Math.max(0, 64 - usedTotal);
+    const free = Math.max(0, 64 - gb.reduce((a,b)=>a+b,0));
+    const segColors = loaded.map((_,i) => PALETTE[i % PALETTE.length]);
     pc.data.datasets[0].data = [...gb, free];
     pc.data.labels = [...loaded.map(t=>t.name), 'free'];
+    pc.data.datasets[0].backgroundColor = [...segColors, FREE_COLOR];   // <-- color the donut to match the legend
     pc.update('none');
     const legendEl = document.getElementById('pieLegend');
-    const colors = ['#C8A96E','#8C7A55','#A98B5C','#D9C091','#6E86C8','#E0C88A','#2A2A28'];
-    if (legendEl) legendEl.innerHTML = [...loaded, {name:'free', mem_gb: free}]
-      .map((t,i) => `<div class="lg-row"><span class="lg-sw" style="background:${colors[i]??'#555'}"></span>${t.name}<span class="gb">${(t.mem_gb??0).toFixed(0)}GB</span></div>`)
-      .join('');
+    if (legendEl) legendEl.innerHTML = [
+      ...loaded.map((t,i) => ({ name: t.name, gb: t.mem_gb, c: segColors[i] })),
+      { name: 'free', gb: free, c: FREE_COLOR },
+    ].map(r => `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
   }
 
   // -- Telemetry --
