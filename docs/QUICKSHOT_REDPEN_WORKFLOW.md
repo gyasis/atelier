@@ -2,7 +2,7 @@
 
 **Goal:** turn the Atelier dashboard from a hardcoded CSS grid into a **Photoshop/Superset-style workspace** where the user drags, resizes, and rearranges panels themselves — and the layout persists — instead of us editing CSS to move things.
 
-**Status:** plan (not yet implemented). Target: `dashboard/ui/` only — no Rust/backend changes.
+**Status:** ✅ **implemented** (2026-06-06). Gridstack vendored at `dashboard/ui/vendor/`, all 6 panels are draggable/resizable widgets, Edit/Lock + Reset toolbar, layout persists to `localStorage["atelier.layout.v1"]`, charts resize on tile resize. Verified in-browser (6 widgets, persistence, charts survive moves). Target was `dashboard/ui/` only — no Rust/backend changes.
 
 ---
 

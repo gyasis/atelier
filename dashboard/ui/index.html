@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Atelier Inference Hub — Observability</title>
 <script src="vendor/chart.umd.min.js"></script>
+<link rel="stylesheet" href="vendor/gridstack.min.css" />
+<script src="vendor/gridstack-all.js"></script>
 <style>
   :root {
     --bg: #0E0E0E;
@@ -302,15 +304,91 @@
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
   ::-webkit-scrollbar-track { background: transparent; }
+  /* ---- Gridstack movable-panel workspace ---- */
+  .grid-stack { background: var(--line); height: 100vh; width: 100vw; overflow: hidden; }
+  .grid-stack-item-content {
+    inset: 0; overflow: hidden; display: flex;
+    background: var(--bg); border: 0;
+  }
+  .grid-stack-item-content > .panel { height: 100%; width: 100%; }
+
+  /* ---- drag grip in each panel header (injected by JS) ---- */
+  .phead .grip {
+    display: none; align-items: center; gap: 2px; margin-right: 8px;
+    color: var(--gold); cursor: move; user-select: none; font-size: 13px; line-height: 1;
+  }
+  body.layout-edit .phead .grip { display: inline-flex; }
+
+  /* ---- edit mode: make it OBVIOUS panels are movable ---- */
+  body.layout-edit .grid-stack-item-content {
+    outline: 1.5px dashed rgba(200,169,110,0.55); outline-offset: -1px;
+  }
+  body.layout-edit .grid-stack-item .phead {
+    cursor: move; background: var(--gold-dim);
+    border-bottom: 1px solid rgba(200,169,110,0.4);
+  }
+  body.layout-edit .grid-stack-item:hover .grid-stack-item-content {
+    outline-color: var(--gold);
+  }
+  /* resize indicators: gold strips on each edge (edit mode only).
+     left/right = X-resize · top/bottom = Y-resize · corners = both */
+  .grid-stack-item > .ui-resizable-handle { opacity: 0; }
+  body.layout-edit .grid-stack-item > .ui-resizable-handle { opacity: 1; }
+  /* X — left/right vertical strips */
+  body.layout-edit .grid-stack-item > .ui-resizable-e,
+  body.layout-edit .grid-stack-item > .ui-resizable-w {
+    width: 6px; top: 10px; height: calc(100% - 20px);
+    background: rgba(200,169,110,0.30); border-radius: 3px;
+  }
+  body.layout-edit .grid-stack-item > .ui-resizable-e { right: 1px; }
+  body.layout-edit .grid-stack-item > .ui-resizable-w { left: 1px; }
+  /* Y — top/bottom horizontal strips */
+  body.layout-edit .grid-stack-item > .ui-resizable-n,
+  body.layout-edit .grid-stack-item > .ui-resizable-s {
+    height: 6px; left: 10px; width: calc(100% - 20px);
+    background: rgba(200,169,110,0.30); border-radius: 3px;
+  }
+  body.layout-edit .grid-stack-item > .ui-resizable-n { top: 1px; }
+  body.layout-edit .grid-stack-item > .ui-resizable-s { bottom: 1px; }
+  /* both — corner squares */
+  body.layout-edit .grid-stack-item > .ui-resizable-se,
+  body.layout-edit .grid-stack-item > .ui-resizable-sw,
+  body.layout-edit .grid-stack-item > .ui-resizable-ne,
+  body.layout-edit .grid-stack-item > .ui-resizable-nw {
+    width: 10px; height: 10px; background: var(--gold); border-radius: 2px;
+  }
+  /* brighten on hover so the active edge is obvious */
+  body.layout-edit .grid-stack-item > .ui-resizable-handle:hover { background: var(--gold); }
+  .grid-stack-placeholder > .placeholder-content {
+    background: var(--gold-dim); border: 1.5px dashed rgba(200,169,110,0.6);
+  }
+
+  /* edit-mode hint banner */
+  .edit-hint {
+    display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 998;
+    background: var(--gold); color: #131312; text-align: center;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; padding: 4px;
+  }
+  body.layout-edit .edit-hint { display: block; }
+  /* layout toolbar */
+  .layout-bar {
+    position: fixed; bottom: 16px; left: 16px; z-index: 999; display: flex; gap: 6px;
+  }
+  .layout-bar button {
+    background: rgba(14,14,14,0.9); color: var(--gold);
+    border: 1px solid rgba(200,169,110,0.35); padding: 5px 12px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+    cursor: pointer; text-transform: uppercase;
+  }
+  .layout-bar button.active { background: var(--gold); color: #131312; }
 </style>
 </head>
 <body>
-<div class="grid">
-
-  <!-- ===================== MAIN (top 70%) ===================== -->
-  <main class="main">
+<div class="grid-stack">
 
     <!-- Panel 1 : Memory -->
+    <div class="grid-stack-item" gs-id="memory-panel" gs-x="0" gs-y="0" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="memory-panel">
       <div class="phead">
         <span class="ptitle"><span class="dot"></span>Resident Memory</span>
@@ -322,9 +400,10 @@
       <div class="pbody">
         <div class="chart-wrap"><canvas id="memChart"></canvas></div>
       </div>
-    </section>
+    </section></div></div>
 
     <!-- Panel 2 : Tenants -->
+    <div class="grid-stack-item" gs-id="tenants-panel" gs-x="4" gs-y="0" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="tenants-panel">
       <div class="phead">
         <span class="ptitle"><span class="dot"></span>Tenants / Sidecars</span>
@@ -335,9 +414,10 @@
           <!-- populated dynamically from governor /pressure -->
         </div>
       </div>
-    </section>
+    </section></div></div>
 
     <!-- Panel 3 : Task time-series -->
+    <div class="grid-stack-item" gs-id="tasks-panel" gs-x="8" gs-y="0" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="tasks-panel">
       <div class="phead">
         <span class="ptitle"><span class="dot"></span>Task Stream</span>
@@ -356,14 +436,10 @@
           </table>
         </div>
       </div>
-    </section>
-
-  </main>
-
-  <!-- ===================== SCENE INFO HUD (bottom 30%) ===================== -->
-  <footer class="hud" data-od-id="scene-info-hud">
+    </section></div></div>
 
     <!-- HUD left : Pie -->
+    <div class="grid-stack-item" gs-id="hud-pie" gs-x="0" gs-y="6" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="hud-pie">
       <div class="phead"><span class="ptitle"><span class="dot"></span>Loaded Now · 64GB</span></div>
       <div class="pbody">
@@ -372,9 +448,10 @@
           <div class="legend" id="pieLegend"></div>
         </div>
       </div>
-    </section>
+    </section></div></div>
 
     <!-- HUD center : stacked line graphs -->
+    <div class="grid-stack-item" gs-id="hud-lines" gs-x="4" gs-y="6" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="hud-lines">
       <div class="phead"><span class="ptitle"><span class="dot"></span>Inference Latency · last 20 req</span></div>
       <div class="pbody">
@@ -389,9 +466,10 @@
           </div>
         </div>
       </div>
-    </section>
+    </section></div></div>
 
     <!-- HUD right : status table -->
+    <div class="grid-stack-item" gs-id="hud-status" gs-x="8" gs-y="6" gs-w="4" gs-h="6"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="hud-status">
       <div class="phead"><span class="ptitle"><span class="dot"></span>Sidecar Status</span></div>
       <div class="pbody" style="padding-top:0;gap:0;display:flex;flex-direction:column">
@@ -409,9 +487,8 @@
           </table>
         </div>
       </div>
-    </section>
+    </section></div></div>
 
-  </footer>
 </div>
 
 <script>
@@ -809,6 +886,104 @@ async function tauriGetCached(cmd) {
 
 refreshAll();
 setInterval(refreshAll, 2500);
+
+// ---- Gridstack movable-panel workspace (drag/resize/persist) ----
+(function initLayout() {
+  if (typeof GridStack === 'undefined') return;   // graceful if vendor missing
+  const LS_KEY = 'atelier.layout.v2';   // v2: clean 3x2 default
+  const ROWS = 12, MARGIN = 4;          // 6-row panels × 2 = 12 rows fill the viewport
+  const cellH = () => Math.max(40, Math.floor((window.innerHeight - (ROWS + 1) * MARGIN) / ROWS));
+  const grid = GridStack.init({
+    column: 12,
+    cellHeight: cellH(),
+    margin: MARGIN,
+    float: false,            // gravity: panels compact up so rows fill (no gaps)
+    staticGrid: true,        // start LOCKED — viewing won't drag panels
+    handle: '.phead',        // drag a panel by its header (titlebar feel)
+    resizable: { handles: 'n,e,s,w,se,sw,ne,nw' },   // grab any edge/corner
+  });
+
+  // affordances: a grip in each header + min-size so tiles can't collapse
+  document.querySelectorAll('.grid-stack-item').forEach(it => {
+    const head = it.querySelector('.phead');
+    if (head && !head.querySelector('.grip')) {
+      const g = document.createElement('span');
+      g.className = 'grip'; g.textContent = '⠿'; g.title = 'drag to move';
+      head.insertBefore(g, head.firstChild);
+    }
+    grid.update(it, { minW: 3, minH: 3 });
+  });
+
+  // edit-mode hint banner
+  const hint = document.createElement('div');
+  hint.className = 'edit-hint';
+  hint.textContent = 'Edit mode — drag a panel by its header (⠿) to move · drag any edge/corner to resize · click Lock when done';
+  document.body.appendChild(hint);
+
+  const resizeCharts = (el) =>
+    (el ? [el] : document.querySelectorAll('.grid-stack-item')).forEach(it =>
+      it.querySelectorAll('canvas').forEach(c => window.Chart?.getChart?.(c)?.resize()));
+  const saveLayout = () => {
+    try { localStorage.setItem(LS_KEY, JSON.stringify(grid.save(false))); } catch {}
+  };
+  const fitHeight = () => grid.cellHeight(cellH());   // 12 rows fill the window exactly
+  window.addEventListener('resize', () => { fitHeight(); resizeCharts(); });
+
+  // restore a saved arrangement
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (Array.isArray(saved) && saved.length) grid.load(saved);
+  } catch {}
+
+  // Row-linked height: resizing a panel's height resizes its row-mates (same row,
+  // i.e. same top edge) to match — so a row resizes as a unit. Width stays per-panel.
+  let _startH = null;
+  grid.on('resizestart', (e, el) => { _startH = el.gridstackNode.h; });
+  grid.on('resizestop', (e, el) => {
+    const n = el.gridstackNode;
+    if (_startH != null && n.h !== _startH) {
+      const newH = n.h, rowY = n.y, startH = _startH;
+      // Reset the resized panel then set the WHOLE row in one batch, so all
+      // row-mates transition to the new height together (gridstack drops the
+      // last column if the resized panel grows before the batch). float:false
+      // then pushes the rows below down uniformly.
+      grid.batchUpdate();
+      grid.update(el, { h: startH });
+      grid.getGridItems().forEach(other => {
+        if (other.gridstackNode.y === rowY) grid.update(other, { h: newH });
+      });
+      grid.batchUpdate(false);
+    }
+    _startH = null;
+    resizeCharts(el);
+    saveLayout();
+  });
+  grid.on('change', () => { resizeCharts(); saveLayout(); });
+
+  // toolbar: Edit/Lock + Reset
+  const bar = document.createElement('div');
+  bar.className = 'layout-bar';
+  const editBtn = document.createElement('button');
+  editBtn.textContent = '✎ Edit Layout';
+  const resetBtn = document.createElement('button');
+  resetBtn.textContent = '⟲ Reset';
+  bar.append(editBtn, resetBtn);
+  document.body.appendChild(bar);
+
+  let editing = false;
+  editBtn.addEventListener('click', () => {
+    editing = !editing;
+    grid.setStatic(!editing);
+    document.body.classList.toggle('layout-edit', editing);
+    editBtn.classList.toggle('active', editing);
+    editBtn.textContent = editing ? '🔒 Lock Layout' : '✎ Edit Layout';
+    if (!editing) saveLayout();
+    resizeCharts();
+  });
+  resetBtn.addEventListener('click', () => { localStorage.removeItem(LS_KEY); location.reload(); });
+
+  requestAnimationFrame(() => { fitHeight(); resizeCharts(); });
+})();
 
 // ---- Toggle: navigate this window to hud.html (same window, replaces view) ----
 // hud.html has a "↗ Full View" button that navigates back.
