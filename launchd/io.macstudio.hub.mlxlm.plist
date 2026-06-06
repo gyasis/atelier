@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MLXLM_MODEL</key>
+		<string>/Users/gyasisutton/models/mlx-llm/Qwen2.5-0.5B-Instruct-4bit</string>
+		<key>MLXLM_ALIAS</key>
+		<string>qwen2.5-0.5b</string>
+		<key>MLXLM_CHILD_PORT</key>
+		<string>18773</string>
+		<key>MLXLM_PORT</key>
+		<string>8773</string>
+		<key>IDLE_UNLOAD_SECONDS</key>
+		<string>600</string>
+		<key>HF_HUB_OFFLINE</key>
+		<string>1</string>
+		<key>HF_HOME</key>
+		<string>/Users/gyasisutton/models/hf-cache</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/mlxlm-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.mlxlm</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/mlxlm-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8773</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/mlxlm-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/mlxlm-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/mlxlm-sidecar</string>
+</dict>
+</plist>

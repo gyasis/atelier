@@ -31,6 +31,7 @@ port_for() {
     omnivoice) echo 8770 ;;
     llamacpp)  echo 8771 ;;
     fastmlx)   echo 8772 ;;
+    mlxlm)     echo 8773 ;;
     governor)  echo 8799 ;;
     comfyui)   echo 8188 ;;
     *)         echo "" ;;

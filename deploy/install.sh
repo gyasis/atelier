@@ -34,7 +34,7 @@ mkdir -p "$MODELS_DIR"/{kokoro,voice-refs,hf-cache,unet,clip,vae,loras,video,whi
 mkdir -p "$HOME/outputs/transcripts"
 
 # ---------- 3. Sidecar venvs ----------
-for SC in kokoro dia omnivoice whisper llamacpp fastmlx governor; do
+for SC in kokoro dia omnivoice whisper llamacpp fastmlx mlxlm governor; do
   SC_DIR="$SERVICES_DIR/${SC}-sidecar"
   case "$SC" in
     kokoro)    SC_DIR="$SERVICES_DIR/kokoro-sidecar" ;;
@@ -43,6 +43,7 @@ for SC in kokoro dia omnivoice whisper llamacpp fastmlx governor; do
     whisper)   SC_DIR="$SERVICES_DIR/whisper-sidecar" ;;
     llamacpp)  SC_DIR="$SERVICES_DIR/llamacpp-sidecar" ;;
     fastmlx)   SC_DIR="$SERVICES_DIR/fastmlx-sidecar" ;;
+    mlxlm)     SC_DIR="$SERVICES_DIR/mlxlm-sidecar" ;;
     governor)  SC_DIR="$SERVICES_DIR/governor-sidecar" ;;
   esac
   say "setting up sidecar: $SC -> $SC_DIR"
@@ -114,7 +115,7 @@ done
 # ---------- 7. Verify ----------
 say "verifying services (give them ~30s to warm)…"
 sleep 30
-for PORT in 8765 8766 8769 8770 8771 8772 8799; do
+for PORT in 8765 8766 8769 8770 8771 8772 8773 8799; do
   if curl -sf --max-time 3 "http://localhost:$PORT/healthz" >/dev/null; then
     echo -e "  \033[1;32m✓\033[0m http://localhost:$PORT/healthz"
   else
