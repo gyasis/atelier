@@ -131,7 +131,9 @@
   /* ---- Tenants card grid ---- */
   .tenant-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    /* auto-fit: cards reflow into as many equal columns as the panel width
+       allows (more when wider, fewer when narrower) — even rows at any size */
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 10px;
     overflow-y: auto;
     align-content: start;
