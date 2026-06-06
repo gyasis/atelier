@@ -332,9 +332,22 @@
   body.layout-edit .grid-stack-item:hover .grid-stack-item-content {
     outline-color: var(--gold);
   }
-  /* resize indicators: gold strips on each edge (edit mode only).
-     left/right = X-resize · top/bottom = Y-resize · corners = both */
-  .grid-stack-item > .ui-resizable-handle { opacity: 0; }
+  /* Seam gutters replace per-panel resize handles: drag the BORDER between
+     panels to resize. The grid-stack's own resize handles are hidden. */
+  .gutter-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 50; }
+  .gutter { position: absolute; pointer-events: auto; background: transparent; }
+  .gutter-v { width: 12px; transform: translateX(-6px); cursor: col-resize; }
+  .gutter-h { height: 12px; transform: translateY(-6px); cursor: row-resize; }
+  body.layout-edit .gutter::after {
+    content: ''; position: absolute; background: rgba(200,169,110,0.35); border-radius: 2px;
+  }
+  body.layout-edit .gutter-v::after { left: 5px; top: 12%; width: 2px; height: 76%; }
+  body.layout-edit .gutter-h::after { top: 5px; left: 12%; height: 2px; width: 76%; }
+  body.layout-edit .gutter:hover::after, .gutter.dragging::after { background: var(--gold); }
+
+  /* old per-panel resize handles — hidden (gutters replace them) */
+  .grid-stack-item > .ui-resizable-handle { display: none !important; opacity: 0; }
+  .grid-stack-item > .ui-resizable-handle-OFF { opacity: 0; }
   body.layout-edit .grid-stack-item > .ui-resizable-handle { opacity: 1; }
   /* X — left/right vertical strips */
   body.layout-edit .grid-stack-item > .ui-resizable-e,
@@ -1032,10 +1045,115 @@ setInterval(refreshAll, 2500);
       grid.load(layout);   // (no target found → all homes restored = snap back)
     }
     _homeSlots = null; _dragId = null;
-    resizeCharts(); saveLayout();
+    resizeCharts(); saveLayout(); rebuildGutters();
   });
 
   grid.on('change', () => { resizeCharts(); saveLayout(); });
+
+  // ---- Seam gutters: drag the BORDER between panels to resize -----------------
+  // gridstack's own resize is off; resize is driven by gutters on the seams.
+  // Vertical seam → resize the panel on its LEFT; the rest of that row redistribute
+  // to EQUAL widths. Horizontal seam → top/bottom rows trade height. Always fills.
+  grid.enableResize(false);
+  const gsEl = document.querySelector('.grid-stack');
+  const gutterOverlay = document.createElement('div');
+  gutterOverlay.className = 'gutter-overlay';
+  gsEl.appendChild(gutterOverlay);
+
+  function rowsByBand() {
+    const map = new Map();
+    grid.getGridItems().forEach(it => {
+      const y = it.gridstackNode.y;
+      if (!map.has(y)) map.set(y, []);
+      map.get(y).push(it);
+    });
+    for (const arr of map.values()) arr.sort((a, b) => a.gridstackNode.x - b.gridstackNode.x);
+    return map;
+  }
+
+  function applyWidthResize(leftId, rowY, dCols, startNodes) {
+    const rowIds = startNodes.filter(n => n.y === rowY).sort((a, b) => a.x - b.x).map(n => n.id);
+    const k = rowIds.length - 1; if (k < 1) return;
+    const startW = startNodes.find(n => n.id === leftId).w;
+    const maxW = COLS - k * MIN_COL;
+    const newW = Math.max(MIN_COL, Math.min(maxW, startW + dCols));
+    let leftover = COLS - newW, base = Math.floor(leftover / k), rem = leftover - base * k, x = 0;
+    const wmap = new Map();
+    rowIds.forEach(id => {
+      let w; if (id === leftId) w = newW; else { w = base + (rem > 0 ? 1 : 0); if (rem > 0) rem--; }
+      wmap.set(id, { x, w }); x += w;
+    });
+    grid.load(startNodes.map(n => wmap.has(n.id)
+      ? { id: n.id, x: wmap.get(n.id).x, y: n.y, w: wmap.get(n.id).w, h: n.h } : { ...n }));
+  }
+  function applyHeightResize(dRows, startNodes) {
+    const topStartH = (startNodes.find(n => n.y === 0) || { h: Math.round(ROWS / 2) }).h;
+    const topH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, topStartH + dRows));
+    grid.load(startNodes.map(n => n.y === 0
+      ? { id: n.id, x: n.x, y: 0, w: n.w, h: topH }
+      : { id: n.id, x: n.x, y: topH, w: n.w, h: ROWS - topH }));
+  }
+
+  function attachGutterDrag(g) {
+    g.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      g.classList.add('dragging');
+      try { g.setPointerCapture(ev.pointerId); } catch (_) {}
+      const rect = gsEl.getBoundingClientRect();
+      const cellW = rect.width / COLS, cellH = rect.height / ROWS;
+      const startX = ev.clientX, startY = ev.clientY;
+      const startNodes = grid.getGridItems().map(it => {
+        const o = it.gridstackNode;
+        return { id: it.getAttribute('gs-id'), x: o.x, y: o.y, w: o.w, h: o.h };
+      });
+      const move = (e) => {
+        if (g._kind === 'v') {
+          g.style.left = (e.clientX - rect.left) + 'px';
+          applyWidthResize(g._leftId, g._rowY, Math.round((e.clientX - startX) / cellW), startNodes);
+        } else {
+          g.style.top = (e.clientY - rect.top) + 'px';
+          applyHeightResize(Math.round((e.clientY - startY) / cellH), startNodes);
+        }
+      };
+      const up = () => {
+        g.classList.remove('dragging');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        saveLayout(); resizeCharts(); rebuildGutters();
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    });
+  }
+
+  function rebuildGutters() {
+    gutterOverlay.innerHTML = '';
+    if (!document.body.classList.contains('layout-edit')) return;
+    const rows = rowsByBand();
+    rows.forEach((row) => {
+      for (let i = 0; i < row.length - 1; i++) {
+        const left = row[i];
+        const g = document.createElement('div');
+        g.className = 'gutter gutter-v';
+        g.style.left = (left.offsetLeft + left.offsetWidth) + 'px';
+        g.style.top = left.offsetTop + 'px';
+        g.style.height = left.offsetHeight + 'px';
+        g._kind = 'v'; g._leftId = left.getAttribute('gs-id'); g._rowY = left.gridstackNode.y;
+        gutterOverlay.appendChild(g); attachGutterDrag(g);
+      }
+    });
+    const ys = [...rows.keys()].sort((a, b) => a - b);
+    if (ys.length >= 2) {
+      const ref = rows.get(ys[0])[0];
+      const g = document.createElement('div');
+      g.className = 'gutter gutter-h';
+      g.style.top = (ref.offsetTop + ref.offsetHeight) + 'px';
+      g.style.left = '0'; g.style.width = '100%';
+      g._kind = 'h';
+      gutterOverlay.appendChild(g); attachGutterDrag(g);
+    }
+  }
+  window.addEventListener('resize', () => requestAnimationFrame(rebuildGutters));
 
   // toolbar: Edit/Lock + Reset
   const bar = document.createElement('div');
@@ -1051,11 +1169,13 @@ setInterval(refreshAll, 2500);
   editBtn.addEventListener('click', () => {
     editing = !editing;
     grid.setStatic(!editing);
+    if (editing) grid.enableResize(false);   // gutters drive resize, not gridstack handles
     document.body.classList.toggle('layout-edit', editing);
     editBtn.classList.toggle('active', editing);
     editBtn.textContent = editing ? '🔒 Lock Layout' : '✎ Edit Layout';
     if (!editing) saveLayout();
     resizeCharts();
+    rebuildGutters();
   });
   resetBtn.addEventListener('click', () => { localStorage.removeItem(LS_KEY); location.reload(); });
 
