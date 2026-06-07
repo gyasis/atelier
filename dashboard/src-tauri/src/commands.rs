@@ -23,7 +23,10 @@ pub async fn get_predictor_stats() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn get_sidecars() -> Result<serde_json::Value, String> {
     // Fetch all sidecar /readyz endpoints + Ollama /api/ps concurrently
-    let (omnivoice, kokoro, whisper, dia, llamacpp, fastmlx, mlxlm, comfyui, ollama) = tokio::join!(
+    // NOTE: Ollama models come from the governor's /pressure tenants now — the
+    // dashboard no longer polls /api/ps here (it flooded ~/.ollama/logs/server.log
+    // with GET lines, pushing real /api/chat|/api/generate calls out of the window).
+    let (omnivoice, kokoro, whisper, dia, llamacpp, fastmlx, mlxlm, comfyui) = tokio::join!(
         fetcher::fetch_sidecar(8770),
         fetcher::fetch_sidecar(8765),
         fetcher::fetch_sidecar(8766),
@@ -32,7 +35,6 @@ pub async fn get_sidecars() -> Result<serde_json::Value, String> {
         fetcher::fetch_sidecar(8772),
         fetcher::fetch_sidecar(8773),
         fetcher::fetch_sidecar(8188),
-        fetcher::fetch_ollama_ps(),
     );
     Ok(serde_json::json!({
         "omnivoice": omnivoice,
@@ -43,7 +45,6 @@ pub async fn get_sidecars() -> Result<serde_json::Value, String> {
         "fastmlx":   fastmlx,
         "mlxlm":     mlxlm,
         "comfyui":   comfyui,
-        "ollama":    ollama,
     }))
 }
 

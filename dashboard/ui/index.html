@@ -731,15 +731,10 @@ async function refreshAll() {
   }));
 
   // Add Ollama from /api/ps (always, even when empty)
-  const ollamaModels = sidecars?.ollama?.models ?? [];
-  if (ollamaModels.length > 0) {
-    ollamaModels.forEach(m => enriched.push({
-      tenant: 'ollama', name: m.name ?? m.model ?? 'unknown',
-      state: 'busy', active_jobs: 0, queue_depth: 0,
-      mem_gb: m.size ? +(m.size / 1e9).toFixed(1) : 0,
-    }));
-  } else {
-    // Show Ollama as a cold slot so user knows it exists
+  // Ollama models already come from the governor's /pressure tenants (in `enriched`).
+  // The dashboard no longer polls /api/ps itself — that flooded the ollama log and
+  // doubled the models. Show a cold slot only if the governor reports none loaded.
+  if (!enriched.some(t => t.tenant === 'ollama')) {
     enriched.push({
       tenant: 'ollama', name: 'ollama', state: 'cold',
       active_jobs: 0, queue_depth: 0, mem_gb: 0,
@@ -891,7 +886,19 @@ async function refreshAll() {
     ts: (s.ts ?? 0) * 1000, st: 'done',
     dur: s.seconds ? s.seconds.toFixed(1)+'s' : '—',
   }));
-  const allRows = [...modelCallRows, ...synthRows].sort((a,b)=>b.ts-a.ts).slice(0,11);
+  // Second source for Ollama calls: the governor's recent_calls (durable, survives
+  // restarts via its history file). Deduped against the dashboard's own log metrics.
+  const govCallRows = (telemetry?.recent_calls ?? []).map(c => ({
+    name: `${c.model ?? 'ollama'} · ${(c.path ?? '/api/chat').replace('/api/','')}`,
+    ts: (c.ts ?? 0) * 1000,
+    st: c.status === '200' ? 'done' : c.status === '500' ? 'fail' : 'run',
+    dur: (typeof c.latency === 'string' ? c.latency.replace(/(\.\d{2})\d+/, '$1') : '—'),
+  }));
+  const _seen = new Set();
+  const allRows = [...modelCallRows, ...govCallRows, ...synthRows]
+    .filter(r => { const k = Math.round(r.ts/1000) + ':' + r.name.split(' · ')[0];
+                   if (_seen.has(k)) return false; _seen.add(k); return true; })
+    .sort((a,b)=>b.ts-a.ts).slice(0,11);
   const tbody = document.getElementById('taskRows');
   if (tbody && allRows.length) tbody.innerHTML = allRows.map(r => {
     const t = new Date(r.ts); const tstr = t.toTimeString().slice(0,8);

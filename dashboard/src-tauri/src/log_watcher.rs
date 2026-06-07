@@ -197,7 +197,7 @@ fn tail_file(source: &str, path: &std::path::Path) {
     }
 
     // --- Backfill: parse last ~512KB of log (typically covers 60+ min) ---
-    let historical = read_tail_bytes(path, 512 * 1024);
+    let historical = read_tail_bytes(path, 4 * 1024 * 1024);   // 4MB — survive the /api/ps flood
     let backfill_count = historical.len();
     for line in &historical {
         parse_line(source, line);

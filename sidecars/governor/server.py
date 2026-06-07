@@ -29,6 +29,7 @@ Exposes (itself observable — no black boxes):
 """
 import asyncio
 import collections
+import json
 import os
 import re
 import sqlite3
@@ -91,6 +92,9 @@ _state = {
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log)
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
+# Durable task history — survives governor restarts (the in-memory deques alone
+# cleared on every restart, so Ollama tasks vanished from the dashboard).
+_HISTORY_PATH = Path.home() / ".atelier" / "telemetry-history.json"
 _recent_synths = collections.deque(maxlen=50)   # per-call sidecar TTS telemetry (from sidecar logs)
 _last_spill = None
 _log_tail_alive = False
@@ -270,7 +274,9 @@ def parse_log_line(line: str):
         # Attach latest perf stats (model name + tok/s) if available
         if _ollama_last_stats:
             entry.update(_ollama_last_stats)
-        _recent_calls.append(entry)
+        # Dedup by timestamp — restored file-history + log backfill can overlap.
+        if not any(abs((c.get("ts") or 0) - ts) < 0.5 for c in _recent_calls):
+            _recent_calls.append(entry)
         return
     m = _OFFLOAD.search(line)
     if m:
@@ -295,10 +301,11 @@ async def _log_tailer():
                 await asyncio.sleep(5)
                 continue
             with OLLAMA_LOG.open("r", errors="replace") as f:
-                # --- Backfill: parse last 512KB on startup to restore _recent_calls ---
+                # --- Backfill: parse last 4MB on startup (the /api/ps poll flood
+                # pushes real /api/chat|/api/generate calls out of a small window) ---
                 f.seek(0, os.SEEK_END)
                 size = f.tell()
-                backfill_start = max(0, size - 512 * 1024)
+                backfill_start = max(0, size - 4 * 1024 * 1024)
                 f.seek(backfill_start)
                 if backfill_start > 0:
                     f.readline()  # skip partial line at seek boundary
@@ -503,13 +510,45 @@ async def _ollama_stats_watcher():
             except Exception:
                 pass
 
+# ---------- durable task history (survives restarts) ----------
+def _save_history():
+    try:
+        _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_PATH.write_text(json.dumps({
+            "recent_calls": list(_recent_calls),
+            "recent_synths": list(_recent_synths),
+            "recent_events": list(_recent_events),
+        }))
+    except Exception as e:
+        print(f"[governor] save history failed: {e}", flush=True)
+
+def _load_history():
+    try:
+        if not _HISTORY_PATH.exists():
+            return
+        d = json.loads(_HISTORY_PATH.read_text())
+        for c in d.get("recent_calls", []): _recent_calls.append(c)
+        for s in d.get("recent_synths", []): _recent_synths.append(s)
+        for ev in d.get("recent_events", []): _recent_events.append(ev)
+        print(f"[governor] restored history: {len(_recent_calls)} calls, "
+              f"{len(_recent_synths)} synths", flush=True)
+    except Exception as e:
+        print(f"[governor] load history failed: {e}", flush=True)
+
+async def _history_saver():
+    while True:
+        await asyncio.sleep(15)
+        _save_history()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _load_history()   # restore task history BEFORE the log tailer adds live ones
     tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer()),
-             asyncio.create_task(_ollama_stats_watcher())]
+             asyncio.create_task(_ollama_stats_watcher()), asyncio.create_task(_history_saver())]
     for nm, p in SIDECAR_LOGS.items():
         tasks.append(asyncio.create_task(_tail_sidecar(nm, p)))
     yield
+    _save_history()
     for t in tasks:
         t.cancel()
 
