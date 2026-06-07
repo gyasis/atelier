@@ -301,9 +301,13 @@
   .lg-row { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; }
   .lg-sw { width: 8px; height: 8px; flex: none; }
   .lg-row .gb { margin-left: auto; color: var(--text-2); }
-  .pie-flex { display: grid; grid-template-columns: 1fr 0.9fr; gap: 12px; flex:1 1 auto; min-height:0; align-items:stretch; }
-  .pie-flex > .mini-wrap { height: 100%; width: 100%; }   /* donut fills the panel, scales with it */
-  .pie-flex > .legend { align-self: center; }
+  /* flexbox: the donut takes all remaining space (flex:1, min-width:0), the legend
+     its natural width. The canvas is absolute so its intrinsic size can't floor the
+     flex item — this is what froze the donut's WIDTH on resize. */
+  .pie-flex { display: flex; gap: 12px; flex:1 1 auto; min-height:0; align-items: stretch; }
+  .pie-flex > .mini-wrap { flex: 1 1 0; min-width: 0; min-height: 0; position: relative; height: auto; }
+  .pie-flex > .mini-wrap > canvas { position: absolute !important; inset: 0; }
+  .pie-flex > .legend { flex: 0 0 auto; align-self: center; }
 
   ::-webkit-scrollbar { width: 7px; height: 7px; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
