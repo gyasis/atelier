@@ -34,10 +34,10 @@
       "source": "YouTube AHqIUDZBRM4 first ~15s (Dune / Fremen documentary narration). Ref kept at original clean level; loudness fixed on output.",
       "added": "2026-05-25"
     },
-    "lucrezia_italian": {
+    "lucrezia": {
       "engine": "omnivoice",
       "language": "it",
-      "ref_audio": "~/models/voice-refs/lucrezia_italian_ref.wav",
+      "ref_audio": "~/models/voice-refs/lucrezia_ref.wav",
       "ref_text": "Ciao a tutti e bentornati sul mio canale, oppure benvenuti se questo è il primo video che guardate qui sul mio canale.",
       "params": {
         "num_step": 48,
@@ -46,20 +46,6 @@
       },
       "post_fx": "none",
       "source": "YouTube S7vnrD7_tYg (Italian lessons channel), first 0-8.2s",
-      "added": "2026-06-09"
-    },
-    "lucrezia_english": {
-      "engine": "omnivoice",
-      "language": "en",
-      "ref_audio": "~/models/voice-refs/lucrezia_english_ref.wav",
-      "ref_text": "Hi everyone, and welcome back to my channel.",
-      "params": {
-        "num_step": 48,
-        "guidance_scale": 2.0,
-        "class_temperature": 0.3
-      },
-      "post_fx": "none",
-      "source": "YouTube LH0YYK5xgPw (English intro line ~0:03-0:06)",
       "added": "2026-06-09"
     }
   }
