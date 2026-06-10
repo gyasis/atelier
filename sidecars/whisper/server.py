@@ -76,8 +76,6 @@ from pydantic import BaseModel, Field
 
 import mlx_whisper
 
-from atelier_admit import admission  # governor admission gate (memory lease for LLM calls)
-
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-large-v3-turbo")
 # Caller-selectable models — the request decides which one Atelier loads.
 # Aliases resolve to a LOCAL on-disk dir when WHISPER_{TURBO,LARGE}_PATH is set
@@ -492,25 +490,29 @@ async def _llm_chat(system: str, user: str, model: str) -> str:
     """One non-streaming Ollama chat turn. Raises 502 if the LLM is unreachable
     so the caller learns post-processing failed (the transcript itself is fine).
 
-    Gated through the governor's admission queue: this LLM call shares the global
-    unified-memory budget with every other backend, so under pressure it waits its
-    turn instead of force-loading a model and evicting someone (or crashing the box).
-    Fail-open — if the governor is down, post-processing still runs ungated."""
+    Routed through the governor's CAPTURING proxy (/llm/ollama/api/chat): the proxy
+    admits this call into the global unified-memory queue (so it waits under pressure
+    instead of force-loading a model / crashing the box) AND records the prompt + token
+    counts for the dashboard. Fail-open — if the governor is unreachable we fall back to
+    calling Ollama directly (ungated, uncaptured), so post-processing never hard-depends
+    on the hub being up."""
     payload = {
         "model": model, "stream": False,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "options": {"temperature": 0.2},
     }
+    proxy_url = f"{GOVERNOR_URL}/llm/ollama/api/chat"
+    direct_url = f"{LLM_URL}/api/chat"
     try:
-        # Acquire a memory lease before loading/using the model; released on exit.
-        async with admission(model=model, backend="ollama",
-                             job_id=f"whisper-llm-{secrets.token_hex(4)}",
-                             max_wait_s=LLM_TIMEOUT, governor_url=GOVERNOR_URL):
-            async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
-                r = await client.post(f"{LLM_URL}/api/chat", json=payload)
+        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
+            try:
+                r = await client.post(proxy_url, json=payload)     # gated + captured
                 r.raise_for_status()
-                content = r.json().get("message", {}).get("content", "")
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError):
+                r = await client.post(direct_url, json=payload)    # governor down → direct
+                r.raise_for_status()
+            content = r.json().get("message", {}).get("content", "")
     except Exception as e:
         raise HTTPException(502, f"LLM post-processing failed ({model} @ {LLM_URL}): {e}")
     return _strip_think(content).strip()
