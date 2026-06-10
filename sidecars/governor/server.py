@@ -148,11 +148,17 @@ async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
         r = await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)
         models = r.json().get("models", [])
+        # A model in /api/ps is RESIDENT; `expires_at` is just its keep-alive expiry, NOT
+        # a "generating now" signal (every loaded model has one). Real activity comes from
+        # the log tail: a /api/chat|generate call within the last 15s. So:
+        #   generating → "busy" (the dashboard pulses), else loaded-and-idle → "idle".
+        generating = _ollama_recently_active()
         return [{
             "tenant": "ollama", "name": m.get("name"),
             "mem_gb": round(m.get("size", 0) / 1e9, 1),
             "context": m.get("context"),
-            "state": "busy" if m.get("expires_at") else "idle",
+            "state": "busy" if generating else "idle",
+            "expires_at": m.get("expires_at"),   # surfaced so the UI can show "loaded until …"
         } for m in models]
     except Exception:
         return []

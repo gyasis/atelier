@@ -191,7 +191,15 @@ mid-job" acceptance criterion.
 | 3.5 | **Live-memory backstop** — `vm_stat` resident/free fed each poll; grant refused if it would breach `live_floor_gb` or the cliff, regardless of est accounting | Optimistic est can't drive the box over the cliff (the prior RAM-crash) | ✅ done |
 | 5 | Reusable admit/release client (`clients/atelier_admit.py`) + adopt in a real caller (whisper's Ollama post-processing) | Client grant+release+fail-open verified; whisper LLM call leases memory | ✅ done |
 | 4 | Cross-backend auto-routing (`resolve_backend`) across Ollama/mlxlm/llamacpp | `backend:"auto"` picks a capable backend, prefers an already-loaded copy; returns `base_url` | ✅ done |
-| 6 (opt) | Promote to enforced proxy (Option B) *iff* bypass is a problem | All LLM traffic gated | ⏳ later |
+| 6 | **Opt-in capturing proxy** — `:8799/llm/...` admits + streams to the backend + records {model, prompt, in_tok, out_tok, status, ms} into a task-stream; admission client routes gated callers through it. Direct callers keep working (uncaptured). | Dashboard task-stream shows prompt + in/out tokens per call | ⏳ next (decided: opt-in, NOT enforced — a live consumer must not be rerouted) |
+
+**Dashboard (done ahead of the proxy):** `poll_ollama` no longer mislabels every loaded model
+`busy` (it was keying on `expires_at`, which every resident model has) — `state` is now `busy`
+only when actually generating (`_ollama_recently_active`), so the tenant card pulses on real
+work. The Task Stream rows are hoverable: a floating card shows model/backend/path/status/
+duration + tok/s, TTFT, and in/out tokens when present, with a `prompt` slot that reads
+"— not captured (enable the capturing proxy)" until Phase 6 feeds it. So the UI is already wired
+for the proxy's output; Phase 6 just has to populate `recent_calls[].prompt/in_tok/out_tok`.
 
 > **Phase 5 scope note:** the originally-named `githubawesome` prep pipeline that fired N
 > parallel calls **does not exist on this machine** — so there was no external N-fan-out caller

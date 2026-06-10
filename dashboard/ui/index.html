@@ -155,6 +155,28 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(200,169,110,0.0); border-color: rgba(200,169,110,0.18); }
     50% { box-shadow: 0 0 0 1px rgba(200,169,110,0.22); border-color: rgba(200,169,110,0.45); }
   }
+  /* Task-stream rows are hoverable; the floating detail card shows full per-call info */
+  tr[data-task] { cursor: help; }
+  tr[data-task]:hover > td { background: rgba(200,169,110,0.06); }
+  #taskHover {
+    position: fixed; z-index: 9999; width: 340px; max-height: 80vh; overflow:auto;
+    background: rgba(18,18,20,0.97); border: 1px solid var(--gold-dim, rgba(200,169,110,0.45));
+    border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.55);
+    font-family: var(--mono, monospace); font-size: 11px; color: var(--text, #e8e4dc);
+    pointer-events: none; backdrop-filter: blur(3px);
+  }
+  #taskHover .thh { font-size:12px; font-weight:600; margin-bottom:6px; padding-bottom:6px;
+    border-bottom:1px solid rgba(200,169,110,0.18); display:flex; justify-content:space-between; gap:8px; }
+  #taskHover .thk { color: var(--gold-dim, #c8a96e); font-size:9px; letter-spacing:.08em; }
+  #taskHover .thr { display:flex; justify-content:space-between; gap:10px; padding:1.5px 0; }
+  #taskHover .thr span { color: rgba(232,228,220,0.55); }
+  #taskHover .thr b { color: var(--text, #e8e4dc); font-weight:500; text-align:right; }
+  #taskHover .thp { margin-top:7px; padding-top:6px; border-top:1px solid rgba(200,169,110,0.18); }
+  #taskHover .thp > span { color: rgba(232,228,220,0.55); display:block; margin-bottom:3px; }
+  #taskHover .thp > div { white-space:pre-wrap; word-break:break-word; color:var(--text,#e8e4dc);
+    max-height:160px; overflow:auto; }
+  #taskHover .thp.muted > div { color: rgba(232,228,220,0.4); font-style:italic; }
+  #taskHover .ths { margin-top:7px; font-size:9px; color: rgba(232,228,220,0.4); text-align:right; }
   .tcard .name {
     font-family: var(--mono);
     font-size: 12px;
@@ -875,16 +897,20 @@ async function refreshAll() {
   }
 
   // -- Task stream: model_call log metrics + synths --
+  // Each row carries a `meta` object → the hover card renders whatever fields exist.
+  // Prompt + in/out tokens populate once the capturing proxy (Phase 6) feeds /telemetry.
   const modelCallRows = (logMetrics ?? []).filter(m => m.source==='ollama' && m.metric==='model_call')
     .slice(-8).map(c => ({
       name: `${c.label ?? 'ollama'} · ${(c.path??'/api/chat').replace('/api/','')}`,
       ts: c.ts, st: c.status===200 ? 'done' : c.status===500 ? 'fail' : 'run',
       dur: c.value > 60000 ? (c.value/60000).toFixed(1)+'m' : c.value > 1000 ? (c.value/1000).toFixed(1)+'s' : Math.round(c.value)+'ms',
+      meta: { kind:'LLM', backend:'ollama', model:c.label, path:c.path, status:c.status, source:'log tail' },
     }));
   const synthRows = (telemetry?.recent_synths ?? []).map(s => ({
     name: `tts · ${s.engine} · ${s.chars ?? 0}ch`,
     ts: (s.ts ?? 0) * 1000, st: 'done',
     dur: s.seconds ? s.seconds.toFixed(1)+'s' : '—',
+    meta: { kind:'TTS', backend:s.engine, chars:s.chars, seconds:s.seconds, text:s.text, source:'sidecar log' },
   }));
   // Second source for Ollama calls: the governor's recent_calls (durable, survives
   // restarts via its history file). Deduped against the dashboard's own log metrics.
@@ -893,6 +919,9 @@ async function refreshAll() {
     ts: (c.ts ?? 0) * 1000,
     st: c.status === '200' ? 'done' : c.status === '500' ? 'fail' : 'run',
     dur: (typeof c.latency === 'string' ? c.latency.replace(/(\.\d{2})\d+/, '$1') : '—'),
+    meta: { kind:'LLM', backend:c.backend ?? 'ollama', model:c.model, path:c.path, status:c.status,
+            latency:c.latency, tok_s:c.tok_s, ttft_ms:c.ttft_ms, eval_tokens:c.eval_tokens ?? c.out_tok,
+            in_tok:c.in_tok ?? c.prompt_tokens, prompt:c.prompt, source:'governor' },
   }));
   const _seen = new Set();
   const allRows = [...modelCallRows, ...govCallRows, ...synthRows]
@@ -900,11 +929,50 @@ async function refreshAll() {
                    if (_seen.has(k)) return false; _seen.add(k); return true; })
     .sort((a,b)=>b.ts-a.ts).slice(0,11);
   const tbody = document.getElementById('taskRows');
-  if (tbody && allRows.length) tbody.innerHTML = allRows.map(r => {
+  window._taskMeta = allRows.map(r => ({ ...r.meta, name:r.name, dur:r.dur, st:r.st, ts:r.ts }));
+  if (tbody && allRows.length) tbody.innerHTML = allRows.map((r,i) => {
     const t = new Date(r.ts); const tstr = t.toTimeString().slice(0,8);
-    return `<tr><td>${r.name}</td><td class="muted">${tstr}</td><td>${r.dur}</td><td><span class="pill ${r.st}">${r.st}</span></td></tr>`;
+    return `<tr data-task="${i}"><td>${r.name}</td><td class="muted">${tstr}</td><td>${r.dur}</td><td><span class="pill ${r.st}">${r.st}</span></td></tr>`;
   }).join('');
 }
+
+// ---- Task hover card: full per-call detail (prompt + tokens land with the proxy) ----
+function _fmtTaskHover(m){
+  const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const row = (k,v) => (v===undefined||v===null||v==='') ? '' : `<div class="thr"><span>${k}</span><b>${esc(v)}</b></div>`;
+  const stamp = m.ts ? new Date(m.ts).toTimeString().slice(0,8) : '';
+  let h = `<div class="thh">${esc(m.name||'task')}<span class="thk">${esc(m.kind||'')}</span></div>`;
+  h += row('backend', m.backend) + row('model', m.model) + row('path', m.path);
+  h += row('status', m.status) + row('started', stamp) + row('duration', m.dur);
+  if (m.tok_s)       h += row('tok/s', (+m.tok_s).toFixed(1));
+  if (m.ttft_ms)     h += row('time-to-first-token', m.ttft_ms+' ms');
+  if (m.in_tok)      h += row('input tokens', m.in_tok);
+  if (m.eval_tokens) h += row('output tokens', m.eval_tokens);
+  if (m.chars)       h += row('chars', m.chars);
+  if (m.seconds)     h += row('audio seconds', (+m.seconds).toFixed(1));
+  const promptText = m.prompt || m.text;
+  if (promptText) h += `<div class="thp"><span>prompt</span><div>${esc(String(promptText).slice(0,600))}</div></div>`;
+  else if (m.kind==='LLM') h += `<div class="thp muted"><span>prompt</span><div>— not captured (enable the capturing proxy to record prompts &amp; in/out tokens)</div></div>`;
+  h += `<div class="ths">source: ${esc(m.source||'?')}</div>`;
+  return h;
+}
+(function _wireTaskHover(){
+  const card = document.createElement('div'); card.id='taskHover'; card.style.display='none';
+  document.body.appendChild(card);
+  document.addEventListener('mouseover', e => {
+    const tr = e.target.closest && e.target.closest('tr[data-task]'); if(!tr) return;
+    const m = (window._taskMeta||[])[+tr.dataset.task]; if(!m) return;
+    card.innerHTML = _fmtTaskHover(m); card.style.display='block';
+    const r = tr.getBoundingClientRect();
+    const top = Math.min(r.top, window.innerHeight - card.offsetHeight - 12);
+    card.style.top = Math.max(8, top) + 'px';
+    card.style.left = Math.max(8, r.left - card.offsetWidth - 12) + 'px';
+  });
+  document.addEventListener('mouseout', e => {
+    const tr = e.target.closest && e.target.closest('tr[data-task]');
+    if (tr && !tr.contains(e.relatedTarget)) card.style.display='none';
+  });
+})();
 
 // After each poll, push data to the embedded HUD iframe (so it doesn't double-poll)
 const _origRefresh = refreshAll;
