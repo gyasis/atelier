@@ -359,7 +359,7 @@
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
   ::-webkit-scrollbar-track { background: transparent; }
   /* ---- Gridstack movable-panel workspace ---- */
-  .grid-stack { background: var(--line); height: 100vh; width: 100vw; overflow: hidden; }
+  .grid-stack { background: var(--line); height: 100vh; width: 100vw; overflow-x: hidden; overflow-y: auto; }
   /* snap resizes instantly so charts read the final container size (no tween) */
   .grid-stack-item, .grid-stack-item-content { transition: none !important; }
   .grid-stack-item-content {
@@ -1130,8 +1130,11 @@ setInterval(refreshAll, 2500);
 (function initLayout() {
   if (typeof GridStack === 'undefined') return;   // graceful if vendor missing
   const LS_KEY = 'atelier.layout.v3';   // v3: model-based (own source of truth)
-  const COLS = 12, ROWS = 12, MARGIN = 4, MIN_COL = 2, MIN_ROW = 2;
-  const cellH = () => Math.max(40, Math.floor((window.innerHeight - (ROWS + 1) * MARGIN) / ROWS));
+  // VIS_ROWS rows fill the viewport (cell height is sized to them, so existing panels
+  // keep their size); ROWS is the larger maxRow that lets a 3rd row (routing) live below,
+  // reachable by scrolling — see .grid-stack overflow-y:auto.
+  const COLS = 12, VIS_ROWS = 12, ROWS = 17, MARGIN = 4, MIN_COL = 2, MIN_ROW = 2;
+  const cellH = () => Math.max(40, Math.floor((window.innerHeight - (VIS_ROWS + 1) * MARGIN) / VIS_ROWS));
   const grid = GridStack.init({
     column: COLS, maxRow: ROWS, cellHeight: cellH(), margin: MARGIN,
     float: true,             // WE place every panel via render(); gridstack never auto-arranges
