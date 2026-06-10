@@ -574,13 +574,14 @@ async def _ollama_stats_watcher():
                         if not models:
                             continue
                         model_name = models[0].get("name", "")
-                        # Fire a tiny probe (8 tokens) for fresh eval stats. The probe follows a
-                        # REAL call (loop now broken), so mirror a normal call's keep-alive — it
-                        # neither pins an idle model (it only fires after real traffic) nor evicts
-                        # one mid-conversation. The model expires ~5m after the last real use.
+                        # Fire a tiny probe (8 tokens) for fresh eval stats. Do NOT pass
+                        # keep_alive — the probe must never EXTEND a model's life (policy: don't
+                        # keep things warm; fade out and reclaim on demand). It inherits the
+                        # global OLLAMA_KEEP_ALIVE, same as the real call it follows, so the model
+                        # expires on the normal short timer instead of being pinned by benchmarking.
                         probe = await client.post(f"{OLLAMA_URL}/api/generate",
                             json={"model": model_name, "prompt": "Hi", "stream": False,
-                                  "options": {"num_predict": 8}, "keep_alive": "5m"},
+                                  "options": {"num_predict": 8}},
                             timeout=30)
                         # Record the probe as a LABELED, visible entry (so the dashboard shows
                         # exactly what the governor is doing) AND mark its GIN line to be skipped.
