@@ -1,37 +1,31 @@
 # Active Context
 
-**Last Updated**: 2026-06-10 12:15:34
+**Last Updated**: 2026-06-10 12:35:37
 
 ## Current Focus
-fix(governor): break self-perpetuating probe loop; make internal calls visible
+fix(dashboard): donut shows real memory — label untracked 'system / other'
 
-The stats watcher's benchmark probe is itself an /api/generate, which the log
-tailer recorded as 'a new call' → triggering the next probe → a 60s loop that
-fired forever and pinned the last-loaded model resident via keep_alive (qwen3-vl,
-24GB, never freed; reloaded seconds after any restart).
+The memory donut charted only Atelier tenants and folded everything else into an
+overstated 'free' wedge, so ~20GB of real usage (OS, other apps, the dashboard,
+MLX caches) hid inside 'free' with no identifier — and the chart went stale when
+nothing was loaded, leaving a phantom segment painted on (the unidentified blue
+chunk the user circled: an already-unloaded model still drawn).
 
-Fix:
-- The watcher now ignores via='governor-probe' entries when deciding to probe, so
-  its own probe can't re-trigger it. Probes fire ONLY after a real call now.
-- The probe's GIN line is marked in _internal_skip and skipped by the log tailer,
-  so it never masquerades as user traffic.
-- The probe is recorded as a LABELED, visible entry (via='governor-probe', with a
-  '▣ governor warm-up/benchmark probe …' prompt) so the dashboard shows exactly
-  what the governor is doing — answering 'where are the prompts / what's happening'.
-
-Verified: 0 probes over a 70s idle window (was ~1/min), qwen3-vl unloaded itself
-(24GB reclaimed), and a real proxied call triggers exactly one labeled probe.
+Now: segments = tenants + a labeled grey 'system / other' wedge for real-but-
+untracked memory (resident_gb − tenant_sum) + ACTUAL free_gb. Always redraws, so
+no stale phantom. Confirmed via redpen: donut said 'free 58GB' while real free
+was ~39GB; the missing ~19GB now shows as 'system / other'.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## Recent Changes
 ```
- .../activity_stream.md    |  12 +
- .../snapshot_latest.json  |   2 +-
- ...2026-06-10-37bba2bb.md | 230 +++++-
- .../activeContext.md      |  38 +-
- .../progress.md           |   2 +-
- 5 files changed, 264 insertions(+), 20 deletions(-)
+ .../activity_stream.md   |   12 +
+ .../snapshot_latest.json |    2 +-
+ ...026-06-10-37bba2bb.md | 1046 +++++-
+ .../activeContext.md     |   39 +-
+ .../progress.md          |    2 +-
+ 5 files changed, 1073 insertions(+), 28 deletions(-)
 ```
 
 ## Modified Files

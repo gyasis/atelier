@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781087737",
+  "timestamp": "2026-06-10T12:35:37+02:00",
+  "mental_state": "fix(dashboard): donut shows real memory — label untracked 'system / other'
+
+The memory donut charted only Atelier tenants and folded everything else into an
+overstated 'free' wedge, so ~20GB of real usage (OS, other apps, the dashboard,
+MLX caches) hid inside 'free' with no identifier — and the chart went stale when",
+  "current_phase": "fix(dashboard): donut shows real memory — label untracked 'system / other'",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["53669095e8db2e82c63d9ecc6dea58b7ecb5dfdb"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}
