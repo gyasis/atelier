@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781086020",
+  "timestamp": "2026-06-10T12:07:00+02:00",
+  "mental_state": "feat(whisper): route LLM post-processing through the capturing proxy
+
+_llm_chat now POSTs to the governor proxy (/llm/ollama/api/chat) instead of
+Ollama directly, so transcript structure/summarize calls are admitted into the
+global memory queue AND captured (prompt + in/out tokens) for the dashboard.",
+  "current_phase": "feat(whisper): route LLM post-processing through the capturing proxy",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["879c22561424856e56a96ec72edc66c48c2475aa"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}

@@ -1,21 +1,17 @@
 # Active Context
 
-**Last Updated**: 2026-06-10 11:27:41
+**Last Updated**: 2026-06-10 12:07:00
 
 ## Current Focus
-feat(governor): Phase 6 capturing proxy + est heuristic + busy-state fix
+feat(whisper): route LLM post-processing through the capturing proxy
 
-- POST /llm/{backend}/{path}: opt-in proxy that admits → forwards (stream +
-  non-stream) → records {model, prompt, in_tok, out_tok, tok_s, status, ms} into
-  recent_calls → releases. Tagged via:proxy; log tailer skips the dup GIN line so
-  the rich entry wins. Verified live: mlxlm call captured prompt + 36/4 tokens.
-- est_gb: parameter-count heuristic from the model name (…-0.5b→0.35GB, …-32b→
-  22.4GB) for sidecar-served models absent from any catalog, instead of the 18GB
-  blind default that wrongly held a tiny call behind the memory backstop.
-- poll_ollama: stop labelling every resident model 'busy' (it keyed on expires_at,
-  which every loaded model has) — 'busy' now means actually generating, so the
-  dashboard card only pulses on real work; surfaces expires_at for the UI.
-- bump /healthz version to 0.8-proxy; 14/14 admission tests pass.
+_llm_chat now POSTs to the governor proxy (/llm/ollama/api/chat) instead of
+Ollama directly, so transcript structure/summarize calls are admitted into the
+global memory queue AND captured (prompt + in/out tokens) for the dashboard.
+Falls back to a direct Ollama call on connection error, so post-processing stays
+fail-open if the governor is down. Drops the now-redundant admission-client
+wrapper (the proxy owns admission). Verified live: a /summarize call surfaced in
+/telemetry as mistral:latest in=158 out=189 tok/s=69.2 with the prompt text.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -23,10 +19,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 ```
  .../activity_stream.md    |  12 +
  .../snapshot_latest.json  |   2 +-
- ...2026-06-10-37bba2bb.md | 699 +++++-
- .../activeContext.md      |  36 +-
+ ...2026-06-10-37bba2bb.md | 438 +++++-
+ .../activeContext.md      |  33 +-
  .../progress.md           |   2 +-
- 5 files changed, 729 insertions(+), 22 deletions(-)
+ 5 files changed, 463 insertions(+), 24 deletions(-)
 ```
 
 ## Modified Files
