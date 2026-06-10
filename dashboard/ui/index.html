@@ -155,6 +155,30 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(200,169,110,0.0); border-color: rgba(200,169,110,0.18); }
     50% { box-shadow: 0 0 0 1px rgba(200,169,110,0.22); border-color: rgba(200,169,110,0.45); }
   }
+  /* Routing control-tower panel */
+  .route-bar { height:20px; border-radius:5px; overflow:hidden; display:flex; background:#1a1a18;
+    border:1px solid var(--line); margin-bottom:12px; flex:0 0 auto; }
+  .route-bar > span { display:flex; align-items:center; justify-content:center; font-size:9px;
+    font-weight:600; overflow:hidden; white-space:nowrap; min-width:0; letter-spacing:.02em; }
+  .route-grid { display:flex; gap:16px; flex:1 1 auto; min-height:0; }
+  .route-col { flex:1 1 0; min-width:0; display:flex; flex-direction:column; min-height:0; }
+  .route-col-wide { flex:1.5 1 0; }
+  .route-h { font-size:8.5px; letter-spacing:.13em; text-transform:uppercase; color:var(--text-3);
+    margin-bottom:7px; flex:0 0 auto; }
+  .route-be { margin-bottom:9px; }
+  .route-be-name { font-family:var(--mono); font-size:11px; color:var(--text);
+    display:flex; justify-content:space-between; gap:8px; }
+  .route-be-name .lease-n { color:var(--text-3); font-size:10px; }
+  .route-be-models { font-size:10px; color:var(--text-2); padding-left:10px; margin-top:1px;
+    word-break:break-word; }
+  .route-q-item, .route-r-item { font-family:var(--mono); font-size:10px; color:var(--text-2);
+    padding:2.5px 0; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .route-r-item span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .route-via { font-size:8px; padding:1px 5px; border-radius:3px; flex:0 0 auto; letter-spacing:.04em; }
+  .via-proxy { background:rgba(95,168,107,.20); color:#7fc98a; }
+  .via-governor-probe { background:rgba(155,110,200,.20); color:#b78fd4; }
+  .via-log { background:rgba(110,134,200,.16); color:#9fb0d8; }
+  .route-empty { font-size:10px; color:var(--text-3); font-style:italic; }
   /* Task-stream rows are hoverable; the floating detail card shows full per-call info */
   tr[data-task] { cursor: help; }
   tr[data-task]:hover > td { background: rgba(200,169,110,0.06); }
@@ -534,6 +558,23 @@
       </div>
     </section></div></div>
 
+    <!-- Routing control tower : LLM admission gate (budget / backends / queue / routing) -->
+    <div class="grid-stack-item" gs-id="routing-panel" gs-x="0" gs-y="12" gs-w="12" gs-h="5"><div class="grid-stack-item-content">
+    <section class="panel" data-od-id="routing-panel">
+      <div class="phead">
+        <span class="ptitle"><span class="dot"></span>Routing · LLM Admission Gate</span>
+        <span class="big-readout"><span class="n" id="routeCommitted" style="font-size:22px">—</span><span class="u">GB held</span></span>
+      </div>
+      <div class="pbody">
+        <div id="routeBudgetBar" class="route-bar"><span style="width:100%;background:#2b2b26;color:#9A958A">governor unreachable</span></div>
+        <div class="route-grid">
+          <div class="route-col"><div class="route-h">Backends · loaded / leased</div><div id="routeBackends"><div class="route-empty">…</div></div></div>
+          <div class="route-col"><div class="route-h">Queue (waiting for memory)</div><div id="routeQueue"><div class="route-empty">…</div></div></div>
+          <div class="route-col route-col-wide"><div class="route-h">Recent routing</div><div class="tbl-scroll" style="flex:1"><div id="routeRecent"></div></div></div>
+        </div>
+      </div>
+    </section></div></div>
+
 </div>
 
 <script>
@@ -712,6 +753,79 @@ function absorbTelemetry(telemetry) {
 // Known loaded memory footprint per sidecar (when warm/busy — from model sizes)
 const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, whisper: 2.0, llamacpp: 8.0, fastmlx: 8.0, mlxlm: 8.0, comfyui: 12.0 };
 
+// Routing control tower — admission-gate budget + per-backend load + queue + routing.
+// Fetches the governor's /budget directly (CSP is null). Degrades gracefully: if /budget
+// is unreachable, backends still render from /pressure and routing from /telemetry.
+const GOVERNOR_URL = 'http://127.0.0.1:8799';
+async function renderRouting(pressure, telemetry) {
+  let budget = null;
+  try {
+    const r = await fetch(`${GOVERNOR_URL}/budget`, { signal: AbortSignal.timeout(2500) });
+    if (r.ok) budget = await r.json();
+  } catch (e) { /* governor down → partial render below */ }
+
+  const shortModel = m => String(m || '?').split('/').pop();
+
+  // --- budget bar ---
+  const bar = document.getElementById('routeBudgetBar');
+  const committedEl = document.getElementById('routeCommitted');
+  if (bar) {
+    if (budget) {
+      const B = budget.budget_gb || 52, used = budget.committed_gb || 0;
+      const freeBud = Math.max(0, B - used);
+      const pct = x => Math.max(0, Math.min(100, (x / B) * 100));
+      if (committedEl) committedEl.textContent = used.toFixed(0);
+      const liveFree = budget.live_free_gb != null ? ` · ${budget.live_free_gb}G real free` : '';
+      bar.innerHTML =
+        `<span style="width:${pct(used)}%;background:#C8A96E;color:#0E0E0E">${used.toFixed(0)}G committed</span>` +
+        `<span style="width:${pct(freeBud)}%;background:#2b2b26;color:#9A958A">${freeBud.toFixed(0)}G of ${B}G budget${liveFree}</span>`;
+    } else {
+      bar.innerHTML = `<span style="width:100%;background:#3a2b2b;color:#c89a9a">governor /budget unreachable</span>`;
+      if (committedEl) committedEl.textContent = '—';
+    }
+  }
+
+  // --- backends: loaded models (from /pressure) + active leases (from /budget) ---
+  const beEl = document.getElementById('routeBackends');
+  if (beEl) {
+    const leases = budget?.active_leases || [];
+    const ollamaLoaded = (pressure?.tenants || [])
+      .filter(t => t.tenant === 'ollama' && (t.mem_gb || 0) > 0)
+      .map(t => `${t.name} (${(t.mem_gb).toFixed(0)}G)`);
+    beEl.innerHTML = ['ollama', 'mlxlm', 'llamacpp'].map(be => {
+      const bl = leases.filter(l => l.backend === be);
+      const leaseModels = bl.map(l => `${shortModel(l.model)} (${l.est_gb}G lease)`);
+      const loaded = be === 'ollama' ? ollamaLoaded : [];
+      const all = [...new Set([...loaded, ...leaseModels])];
+      return `<div class="route-be"><div class="route-be-name"><span>${be}</span>` +
+        `<span class="lease-n">${bl.length || 0} lease${bl.length === 1 ? '' : 's'}</span></div>` +
+        `<div class="route-be-models">${all.length ? all.join(', ') : '<span class="route-empty">idle</span>'}</div></div>`;
+    }).join('');
+  }
+
+  // --- queue ---
+  const qEl = document.getElementById('routeQueue');
+  if (qEl) {
+    const q = budget?.queue || [];
+    qEl.innerHTML = q.length
+      ? q.map(it => `<div class="route-q-item"><span>#${it.position} ${shortModel(it.model)} → ${it.backend}</span>` +
+          `<span>${it.est_gb}G · ${(it.wait_s || 0).toFixed(0)}s</span></div>`).join('')
+      : '<div class="route-empty">no jobs queued — everything fits</div>';
+  }
+
+  // --- recent routing (from telemetry: model → backend, tagged by capture source) ---
+  const rEl = document.getElementById('routeRecent');
+  if (rEl) {
+    const calls = (telemetry?.recent_calls || []).slice(-14).reverse();
+    rEl.innerHTML = calls.length ? calls.map(c => {
+      const via = (c.via || 'log').replace(/[^a-z-]/gi, '');
+      const be = c.backend || 'ollama';
+      return `<div class="route-r-item"><span>${shortModel(c.model)} → ${be}</span>` +
+        `<span class="route-via via-${via}">${c.via || 'log'}</span></div>`;
+    }).join('') : '<div class="route-empty">no recent calls</div>';
+  }
+}
+
 async function refreshAll() {
   const [pressure, telemetry, sidecars, stats, logMetrics] = await Promise.all([
     tauriGet('get_pressure'),
@@ -827,6 +941,9 @@ async function refreshAll() {
     if (legendEl) legendEl.innerHTML = segs.map(r =>
       `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
   }
+
+  // -- Routing control tower --
+  renderRouting(pressure, telemetry);
 
   // -- Telemetry --
   absorbTelemetry(telemetry);
