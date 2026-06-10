@@ -1,8 +1,8 @@
 {
-  "session_id": "0f0aa457-1eb3-474c-bc56-f1593fe3cff3",
+  "session_id": "3a57c8c5-0e34-48e8-bb67-f76f239c7ba6",
   "user_id": "gyasisutton",
   "project_path": "/Users/gyasisutton/Documents/code/atelier",
-  "status": "finalized",
+  "status": "active",
   "agents": {
     "main": {
       "status": "idle"
@@ -15,6 +15,6 @@
     }
   },
   "initialized_at": "2026-05-30T23:15:13+02:00",
-  "last_session_start": "2026-06-10T09:41:04.984771",
+  "last_session_start": "2026-06-10T09:41:13.509393",
   "last_session_end": "2026-06-10T09:41:13.149980"
 }

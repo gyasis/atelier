@@ -182,15 +182,73 @@ mid-job" acceptance criterion.
 
 ## 6. Phased plan
 
-| Phase | Deliverable | Acceptance |
-|---|---|---|
-| 0 ✅ | Config: `OLLAMA_CONTEXT_LENGTH=16384`, `MAX_LOADED_MODELS=3`, persisted via `io.macstudio.ollama-env.plist` | Two ~20 GB models co-reside without eviction |
-| 1 | `est_gb` table + `GET /budget` (read-only: budget, committed, loaded, freeable) | Numbers match `vm_stat` / `/api/ps` within tolerance |
-| 2 | `POST /admit` + `/release`, in-memory leases, single lock, **no eviction** (queue when full) | Two different-model jobs: one runs, one queues; neither evicts the other |
-| 3 | Idle-only eviction via `make-room` when queue head needs room | Queued job starts after an *idle* model is reclaimed; busy models untouched |
-| 4 | Cross-backend routing (`pick_backend`) across Ollama/mlxlm/llamacpp | A GGUF job and an MLX job run in parallel under budget |
-| 5 | Adopt in the real callers (the #77 prep pipeline that fires N parallel TTS/LLM calls) | Pipeline consumes grants instead of racing; no clears under load |
-| 6 (opt) | Promote to enforced proxy (Option B) *iff* bypass is a problem | All LLM traffic gated |
+| Phase | Deliverable | Acceptance | Status |
+|---|---|---|---|
+| 0 | Config: `OLLAMA_CONTEXT_LENGTH=16384`, `MAX_LOADED_MODELS=3`, persisted via `io.macstudio.ollama-env.plist` | Two ~20 GB models co-reside without eviction | ✅ done |
+| 1 | `est_gb` (overrides + `/api/tags`) + `GET /budget` (budget, committed, untracked, leases, queue) | Numbers match `vm_stat` / `/api/ps` | ✅ done |
+| 2 | `POST /admit` + `/release`, in-memory leases, single `asyncio.Lock`, **no eviction** (queue when full) | Two different-model jobs: one runs, one queues; neither evicts the other | ✅ done |
+| 3 | Idle-only eviction via `make-room` when queue head is memory-held (rate-limited) | Queued job starts after an *idle* model is reclaimed; busy models untouched | ✅ done |
+| 3.5 | **Live-memory backstop** — `vm_stat` resident/free fed each poll; grant refused if it would breach `live_floor_gb` or the cliff, regardless of est accounting | Optimistic est can't drive the box over the cliff (the prior RAM-crash) | ✅ done |
+| 5 | Reusable admit/release client (`clients/atelier_admit.py`) + adopt in a real caller (whisper's Ollama post-processing) | Client grant+release+fail-open verified; whisper LLM call leases memory | ✅ done |
+| 4 | Cross-backend auto-routing (`resolve_backend`) across Ollama/mlxlm/llamacpp | `backend:"auto"` picks a capable backend, prefers an already-loaded copy; returns `base_url` | ✅ done |
+| 6 (opt) | Promote to enforced proxy (Option B) *iff* bypass is a problem | All LLM traffic gated | ⏳ later |
+
+> **Phase 5 scope note:** the originally-named `githubawesome` prep pipeline that fired N
+> parallel calls **does not exist on this machine** — so there was no external N-fan-out caller
+> to retrofit. Phase 5 instead shipped the reusable client (the one-import primitive any future
+> pipeline adopts) and wired it into the real in-repo LLM caller that was bypassing the gate:
+> whisper's transcript post-processing (`sidecars/whisper/server.py:_llm_chat`). When the
+> githubawesome pipeline is built, it imports `atelier_admit` and the same loop applies.
+
+### Phase 4 routing — what it can and can't do
+
+Each LLM **sidecar** (mlxlm, llamacpp) serves ONE configured model at a time (reported via its
+`/readyz` `model` field); **Ollama** serves its whole `/api/tags` catalog. So `resolve_backend`:
+honors an explicit `backend`; on `"auto"` picks a backend whose catalog can serve the model,
+preferring one that already has it **loaded** (free memory), Ollama among ties. It returns the
+chosen `backend` + `base_url` so the caller knows where to send the request. It does **not**
+move a model to a backend that can't serve it — cross-backend parallelism is real only for
+models a backend is actually configured to host.
+
+### Implementation notes (as built)
+
+- **Code:** `sidecars/governor/admission.py` (pure `Gate` core — state + decision, no I/O) +
+  endpoints/reconciliation in `sidecars/governor/server.py`. Tests: `test_admission.py` (9 cases).
+- **Live-memory backstop (Phase 3.5)** answers the real-world failure: est accounting alone can
+  drift from reality, and the box has hard-crashed on RAM overload. The poller feeds `vm_stat`
+  resident/free into the gate every cycle; a grant must pass **both** the est-budget check **and**
+  the measured-memory guard (`free − live_floor` must cover the estimate; never grant when already
+  over the cliff). Verified live: a 15 GB job was *held* when only 17.9 GB was actually free, even
+  though est-budget showed 27 GB "free."
+- **Bypass honesty:** the gate counts Ollama models loaded *without* a lease as `untracked_gb`
+  against the budget, so direct (un-gated) callers don't make it over-promise.
+- **Config knobs (env):** `ATELIER_LLM_BUDGET_GB` (default `CLIFF_GB−3`), `ATELIER_LLM_HEADROOM_GB`,
+  `ATELIER_LLM_LIVE_FLOOR_GB` (default 4), `ATELIER_LLM_DEFAULT_EST_GB`, `ATELIER_LLM_LEASE_TTL_S`,
+  `ATELIER_ADMIT_EVICT_COOLDOWN`, `OLLAMA_NUM_PARALLEL`.
+
+### Client contract (Option A, cooperative)
+
+```
+POST /admit  {job_id, model, backend?="auto", est_gb?}
+  → {grant:true,  lease_id, backend, base_url, routed, reserved_gb, reused, ttl_s}  # run now
+  → {grant:false, position, eta_s, reason, retry}                                   # hold; re-POST same job_id
+POST /release {lease_id | job_id}                                     # always call when done/aborted
+GET  /budget                                                          # observe budget + queue
+```
+`backend:"auto"` (the default) lets the gate route — the grant's `backend`/`base_url` tell the
+caller where to send the request. Re-POST `/admit` with the same `job_id` to poll **and** renew
+the TTL. Leases auto-reap after `ttl_s` if a client dies without `/release`.
+
+The easiest adoption is the client helper — no manual polling:
+
+```python
+from atelier_admit import admission          # clients/atelier_admit.py
+async with admission(model="qwen3:32b", backend="auto", est_gb=20) as lease:
+    if lease.granted:
+        # send to lease.backend / its base_url (or your known URL)
+        ...
+# released automatically; fail-open if the governor is down (lease.granted == False)
+```
 
 ---
 

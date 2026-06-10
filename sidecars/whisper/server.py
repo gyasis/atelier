@@ -76,6 +76,8 @@ from pydantic import BaseModel, Field
 
 import mlx_whisper
 
+from atelier_admit import admission  # governor admission gate (memory lease for LLM calls)
+
 DEFAULT_MODEL = os.environ.get("WHISPER_MODEL_REPO", "mlx-community/whisper-large-v3-turbo")
 # Caller-selectable models — the request decides which one Atelier loads.
 # Aliases resolve to a LOCAL on-disk dir when WHISPER_{TURBO,LARGE}_PATH is set
@@ -100,6 +102,7 @@ HUB_TOKEN = os.environ.get("HUB_TOKEN")
 LLM_URL = os.environ.get("WHISPER_LLM_URL", "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get("WHISPER_LLM_MODEL", "qwen3:32b")
 LLM_TIMEOUT = float(os.environ.get("WHISPER_LLM_TIMEOUT", "300"))
+GOVERNOR_URL = os.environ.get("ATELIER_GOVERNOR_URL", "http://127.0.0.1:8799")
 # Constitutional idle-unload (see kokoro/dia): a multi-GB model squatting on
 # unified memory while idle starves video/LLM jobs. Default unload after 5 min.
 # KEEP_WARM=true opts out (e.g. a long batch transcription session).
@@ -487,7 +490,12 @@ def _extract_json(s: str) -> dict | None:
 
 async def _llm_chat(system: str, user: str, model: str) -> str:
     """One non-streaming Ollama chat turn. Raises 502 if the LLM is unreachable
-    so the caller learns post-processing failed (the transcript itself is fine)."""
+    so the caller learns post-processing failed (the transcript itself is fine).
+
+    Gated through the governor's admission queue: this LLM call shares the global
+    unified-memory budget with every other backend, so under pressure it waits its
+    turn instead of force-loading a model and evicting someone (or crashing the box).
+    Fail-open — if the governor is down, post-processing still runs ungated."""
     payload = {
         "model": model, "stream": False,
         "messages": [{"role": "system", "content": system},
@@ -495,10 +503,14 @@ async def _llm_chat(system: str, user: str, model: str) -> str:
         "options": {"temperature": 0.2},
     }
     try:
-        async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
-            r = await client.post(f"{LLM_URL}/api/chat", json=payload)
-            r.raise_for_status()
-            content = r.json().get("message", {}).get("content", "")
+        # Acquire a memory lease before loading/using the model; released on exit.
+        async with admission(model=model, backend="ollama",
+                             job_id=f"whisper-llm-{secrets.token_hex(4)}",
+                             max_wait_s=LLM_TIMEOUT, governor_url=GOVERNOR_URL):
+            async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
+                r = await client.post(f"{LLM_URL}/api/chat", json=payload)
+                r.raise_for_status()
+                content = r.json().get("message", {}).get("content", "")
     except Exception as e:
         raise HTTPException(502, f"LLM post-processing failed ({model} @ {LLM_URL}): {e}")
     return _strip_think(content).strip()

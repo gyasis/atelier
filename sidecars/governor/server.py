@@ -26,6 +26,9 @@ Exposes (itself observable — no black boxes):
   GET  /predictor/stats learned per-model compute stats   ·   GET /predictor/export portable dataset
   POST /make-room       (b) evict ONLY idle models across both tenants
   POST /force-stop      (c) human-gated two-phase yield negotiation to preempt a BUSY model
+  GET  /budget          (e) global LLM memory budget + active leases + wait queue
+  POST /admit           (e) admission gate — grant if it fits, else queue (never evict on arrival)
+  POST /release         (e) drop a lease when a job finishes/aborts
 """
 import asyncio
 import collections
@@ -45,6 +48,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 import predictor  # modular per-model ETA predictor (persistent, Bayesian)
+import admission  # modular memory-aware LLM admission gate (docs/LLM_ADMISSION_QUEUE.md)
 
 TOTAL_RAM_GB = float(os.environ.get("ATELIER_TOTAL_RAM_GB", "64"))
 CLIFF_GB = float(os.environ.get("ATELIER_CLIFF_GB", "55"))   # swap onset
@@ -82,6 +86,24 @@ SIDECAR_LABELS = {
     "fastmlx": "io.macstudio.hub.fastmlx",
     "mlxlm": "io.macstudio.hub.mlxlm",
 }
+
+# ---------- LLM admission gate (the request-path queue) ----------
+# Global memory budget for co-resident LLMs: keep total LLM-resident under the cliff,
+# minus a headroom cushion. One pool across Ollama + mlxlm + llamacpp (unified memory).
+LLM_HEADROOM_GB = float(os.environ.get("ATELIER_LLM_HEADROOM_GB", "3"))
+LLM_BUDGET_GB = float(os.environ.get("ATELIER_LLM_BUDGET_GB", str(CLIFF_GB - LLM_HEADROOM_GB)))
+LLM_NUM_PARALLEL = int(os.environ.get("OLLAMA_NUM_PARALLEL", "1"))
+LLM_LEASE_TTL_S = float(os.environ.get("ATELIER_LLM_LEASE_TTL_S", "900"))
+LLM_DEFAULT_EST_GB = float(os.environ.get("ATELIER_LLM_DEFAULT_EST_GB", "18"))
+# Seed estimates for non-Ollama backends / before /api/tags is cached. Substring match.
+_EST_OVERRIDES = {
+    "qwen3-coder-next": 50.0, "deepseek-r1:70b": 43.0,
+}
+LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
+gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,
+                      num_parallel=LLM_NUM_PARALLEL, est_overrides=_EST_OVERRIDES,
+                      default_ttl_s=LLM_LEASE_TTL_S, cliff_gb=CLIFF_GB,
+                      live_floor_gb=LLM_LIVE_FLOOR_GB)
 
 _state = {
     "updated_at": None, "level": "ok", "free_gb": None, "resident_gb": None,
@@ -242,9 +264,65 @@ async def _poller():
                     await _auto_relieve(vm, tenants)   # (d) auto idle-evict; recommend (not execute) force-stop
                 elif level == "ok":
                     _state["recommendation"] = None    # pressure cleared — drop any stale recommendation
+                # ---- feed the admission gate: live memory + model sizes + reconcile ----
+                await _refresh_gate(client, vm, tenants)
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
             await asyncio.sleep(POLL_SECONDS)
+
+
+# Phase 4: which backends the gate can route across, and where to reach them.
+LLM_ROUTE_BASE = {"ollama": OLLAMA_URL,
+                  "mlxlm": SIDECAR_BASE.get("mlxlm", ""),
+                  "llamacpp": SIDECAR_BASE.get("llamacpp", "")}
+_tags_last = 0.0
+_sidecar_models: dict[str, str] = {}   # backend → the single model it currently serves
+
+
+async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]):
+    """Keep the admission gate's view of the world current each poll:
+      - live measured memory (the HARD crash backstop — beats est accounting),
+      - model-weight sizes from Ollama /api/tags + backend catalogs (refreshed lazily),
+      - untracked GB = models loaded with no lease (bypass-honest),
+      - loaded set for Phase-4 routing (prefer an already-resident copy),
+      - reap leases whose client died without /release."""
+    global _tags_last
+    # (a) live memory floor — the real safety net against the RAM-overload crash
+    gate.set_live(resident_gb=vm.get("resident_gb"), free_gb=vm.get("free_gb"))
+    # (b) refresh model sizes + backend catalogs at most every 60s
+    now = time.time()
+    if now - _tags_last > 60:
+        catalog: dict[str, list[str]] = {}
+        try:
+            tags = (await client.get(f"{OLLAMA_URL}/api/tags", timeout=4)).json().get("models", [])
+            gate.set_tags({m["name"]: round(m.get("size", 0) / 1e9, 2) for m in tags})
+            catalog["ollama"] = [m["name"] for m in tags]
+        except Exception:
+            pass
+        for be in ("mlxlm", "llamacpp"):       # each LLM sidecar serves one configured model
+            try:
+                d = (await client.get(f"{SIDECAR_BASE[be]}/readyz", timeout=3)).json()
+                if d.get("model"):
+                    _sidecar_models[be] = d["model"]
+                    catalog[be] = [d["model"]]
+            except Exception:
+                pass
+        gate.set_catalog(catalog, LLM_ROUTE_BASE)
+        _tags_last = now
+    # (c) untracked load = Ollama models currently loaded but not held by any lease
+    loaded = [{"backend": "ollama", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
+              for t in tenants if t.get("tenant") == "ollama" and t.get("name")]
+    gate.set_untracked_gb(gate.untracked_from(loaded))
+    # (d) loaded set for routing: Ollama resident models + any warm LLM sidecar
+    loaded_set = {("ollama", t["name"]) for t in tenants
+                  if t.get("tenant") == "ollama" and t.get("name")}
+    for be in ("mlxlm", "llamacpp"):
+        st = next((t.get("state") for t in tenants if t.get("name") == be), None)
+        if be in _sidecar_models and st not in (None, "cold", "unreachable"):
+            loaded_set.add((be, _sidecar_models[be]))
+    gate.set_loaded(loaded_set)
+    # (e) backstop reaper for dead clients
+    await gate.reap(now)
 
 # ---------- Ollama log tailer ----------
 _GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*\S+\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
@@ -556,7 +634,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.6-predictor"}
+    return {"ok": True, "service": "governor", "version": "0.7-admission"}
 
 @app.get("/readyz")
 def readyz():
@@ -988,3 +1066,76 @@ async def force_stop(req: ForceStopReq):
                 "before_gb": before, "after_gb": after, "freed_gb": round((after or 0) - (before or 0), 1),
                 "reached": (after >= req.need_gb) if req.need_gb else None,
                 "result": result}
+
+
+# ========== LLM admission gate — the request-path queue (docs/LLM_ADMISSION_QUEUE.md) ==========
+# Clients call POST /admit BEFORE hitting a backend; run only on grant=true; POST /release
+# when done. The gate packs jobs into ONE global memory budget across Ollama+mlxlm+llamacpp,
+# queues what doesn't fit (never evicts a running model on arrival), and is backstopped by
+# live vm_stat memory so it can't drive the machine over the cliff.
+
+ADMIT_EVICT_COOLDOWN = float(os.environ.get("ATELIER_ADMIT_EVICT_COOLDOWN", "15"))
+_last_admit_evict = 0.0
+
+
+class AdmitReq(BaseModel):
+    job_id: str = ""               # caller-stable id; re-poll with the same id to check/renew
+    model: str = ""                # model name (e.g. "qwen3:32b")
+    backend: str = "auto"          # "auto" | "ollama" | "mlxlm" | "llamacpp" — auto picks one
+    est_gb: float = 0.0            # optional footprint hint; else estimated from /api/tags
+
+
+class ReleaseReq(BaseModel):
+    lease_id: str = ""
+    job_id: str = ""
+
+
+@app.get("/budget")
+def budget():
+    """Read-only view of the global LLM memory budget, active leases, and the wait queue."""
+    snap = gate.snapshot()
+    snap.update({"ok": True, "live_resident_gb": _state.get("resident_gb"),
+                 "live_free_gb": _state.get("free_gb"), "cliff_gb": CLIFF_GB,
+                 "live_floor_gb": LLM_LIVE_FLOOR_GB})
+    return snap
+
+
+@app.post("/admit")
+async def admit(req: AdmitReq):
+    if not req.job_id or not req.model:
+        return {"ok": False, "error": "job_id and model are required"}
+    d = await gate.admit(req.job_id, req.model, backend=req.backend, est_gb=req.est_gb)
+    # Phase 3: if the queue HEAD is held by memory pressure, try reclaiming IDLE models
+    # once (make-room never touches a busy model), then re-decide. Rate-limited so a
+    # polling client can't hammer make-room.
+    global _last_admit_evict
+    if not d.grant and d.needs_idle_evict and (time.time() - _last_admit_evict) > ADMIT_EVICT_COOLDOWN:
+        _last_admit_evict = time.time()
+        try:
+            res = await make_room(MakeRoomReq(dry_run=False))
+            freed = [f.get("name") for f in res.get("freed", []) if f.get("evicted") or f.get("result")]
+            if freed:
+                # refresh the gate's untracked view immediately so the retry sees the room
+                async with httpx.AsyncClient() as c:
+                    tenants = await poll_ollama(c)
+                gate.set_live(resident_gb=read_vm()["resident_gb"], free_gb=read_vm()["free_gb"])
+                loaded = [{"backend": "ollama", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
+                          for t in tenants if t.get("name")]
+                gate.set_untracked_gb(gate.untracked_from(loaded))
+                d = await gate.admit(req.job_id, req.model, backend=req.backend, est_gb=req.est_gb)
+                d.reason = (d.reason + f" (after idle-evict: {freed})").strip()
+        except Exception as e:
+            print(f"[governor] admit idle-evict failed: {e}", flush=True)
+    if d.grant:
+        return {"ok": True, "grant": True, "lease_id": d.lease_id, "backend": d.backend,
+                "base_url": d.base_url, "routed": d.routed, "reserved_gb": d.reserved_gb,
+                "reused": d.reused, "ttl_s": d.ttl_s, "reason": d.reason}
+    return {"ok": True, "grant": False, "position": d.position, "eta_s": d.eta_s,
+            "reason": d.reason, "retry": "re-POST /admit with the same job_id to re-check"}
+
+
+@app.post("/release")
+async def release(req: ReleaseReq):
+    if not req.lease_id and not req.job_id:
+        return {"ok": False, "error": "lease_id or job_id required"}
+    return await gate.release(lease_id=req.lease_id, job_id=req.job_id)
