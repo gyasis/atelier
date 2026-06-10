@@ -1,17 +1,26 @@
 # Active Context
 
-**Last Updated**: 2026-06-10 12:07:00
+**Last Updated**: 2026-06-10 12:15:34
 
 ## Current Focus
-feat(whisper): route LLM post-processing through the capturing proxy
+fix(governor): break self-perpetuating probe loop; make internal calls visible
 
-_llm_chat now POSTs to the governor proxy (/llm/ollama/api/chat) instead of
-Ollama directly, so transcript structure/summarize calls are admitted into the
-global memory queue AND captured (prompt + in/out tokens) for the dashboard.
-Falls back to a direct Ollama call on connection error, so post-processing stays
-fail-open if the governor is down. Drops the now-redundant admission-client
-wrapper (the proxy owns admission). Verified live: a /summarize call surfaced in
-/telemetry as mistral:latest in=158 out=189 tok/s=69.2 with the prompt text.
+The stats watcher's benchmark probe is itself an /api/generate, which the log
+tailer recorded as 'a new call' → triggering the next probe → a 60s loop that
+fired forever and pinned the last-loaded model resident via keep_alive (qwen3-vl,
+24GB, never freed; reloaded seconds after any restart).
+
+Fix:
+- The watcher now ignores via='governor-probe' entries when deciding to probe, so
+  its own probe can't re-trigger it. Probes fire ONLY after a real call now.
+- The probe's GIN line is marked in _internal_skip and skipped by the log tailer,
+  so it never masquerades as user traffic.
+- The probe is recorded as a LABELED, visible entry (via='governor-probe', with a
+  '▣ governor warm-up/benchmark probe …' prompt) so the dashboard shows exactly
+  what the governor is doing — answering 'where are the prompts / what's happening'.
+
+Verified: 0 probes over a 70s idle window (was ~1/min), qwen3-vl unloaded itself
+(24GB reclaimed), and a real proxied call triggers exactly one labeled probe.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -19,10 +28,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 ```
  .../activity_stream.md    |  12 +
  .../snapshot_latest.json  |   2 +-
- ...2026-06-10-37bba2bb.md | 438 +++++-
- .../activeContext.md      |  33 +-
+ ...2026-06-10-37bba2bb.md | 230 +++++-
+ .../activeContext.md      |  38 +-
  .../progress.md           |   2 +-
- 5 files changed, 463 insertions(+), 24 deletions(-)
+ 5 files changed, 264 insertions(+), 20 deletions(-)
 ```
 
 ## Modified Files
