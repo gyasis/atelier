@@ -191,7 +191,23 @@ mid-job" acceptance criterion.
 | 3.5 | **Live-memory backstop** — `vm_stat` resident/free fed each poll; grant refused if it would breach `live_floor_gb` or the cliff, regardless of est accounting | Optimistic est can't drive the box over the cliff (the prior RAM-crash) | ✅ done |
 | 5 | Reusable admit/release client (`clients/atelier_admit.py`) + adopt in a real caller (whisper's Ollama post-processing) | Client grant+release+fail-open verified; whisper LLM call leases memory | ✅ done |
 | 4 | Cross-backend auto-routing (`resolve_backend`) across Ollama/mlxlm/llamacpp | `backend:"auto"` picks a capable backend, prefers an already-loaded copy; returns `base_url` | ✅ done |
-| 6 | **Opt-in capturing proxy** — `:8799/llm/...` admits + streams to the backend + records {model, prompt, in_tok, out_tok, status, ms} into a task-stream; admission client routes gated callers through it. Direct callers keep working (uncaptured). | Dashboard task-stream shows prompt + in/out tokens per call | ⏳ next (decided: opt-in, NOT enforced — a live consumer must not be rerouted) |
+| 6 | **Opt-in capturing proxy** — `POST :8799/llm/{backend}/{path}` admits (waits in queue) → forwards (stream + non-stream) → records {model, prompt, in_tok, out_tok, tok_s, status, ms} into `recent_calls` → releases. Direct callers untouched. | Dashboard task-stream shows prompt + in/out tokens per call | ✅ done — verified: a proxied mlxlm call captured prompt + in/out tokens (36/4) into /telemetry |
+
+### Phase 6 notes (as built)
+
+- **Endpoint:** `POST /llm/{backend}/{path:path}` where backend ∈ {ollama, mlxlm, llamacpp}.
+  Forwards verbatim to that backend's `base_url/path`. Example: `POST /llm/ollama/api/chat`,
+  `POST /llm/mlxlm/v1/chat/completions`.
+- **Capture:** prompt extracted from `messages[]`/`prompt`; tokens from OpenAI `usage`
+  (`prompt_tokens`/`completion_tokens`) or Ollama (`prompt_eval_count`/`eval_count`, +`tok_s`
+  from `eval_duration`). Streaming buffers the body and parses the final usage chunk.
+- **No double-count:** proxied calls are tagged `via:"proxy"` and recorded in `_proxy_recent`;
+  the Ollama log tailer skips a GIN line that matches a recent proxy entry, so the rich entry wins.
+- **est_gb heuristic:** models absent from every catalog (sidecar-served MLX/GGUF) are estimated
+  from the parameter count in the name (`…-0.5b` → 0.35 GB, `…-32b` → 22.4 GB) instead of the
+  18 GB blind default — this was found live (a 0.5B call was wrongly held by the memory backstop).
+- **Adoption:** opt-in. Whisper still uses its fail-open admission-client path; to route a caller
+  through capture, POST to `/llm/{backend}/...` instead of the backend directly.
 
 **Dashboard (done ahead of the proxy):** `poll_ollama` no longer mislabels every loaded model
 `busy` (it was keying on `expires_at`, which every resident model has) — `state` is now `busy`

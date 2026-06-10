@@ -17,6 +17,7 @@ models across backends does not add memory, it only adds parallelism WITHIN the 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -180,6 +181,12 @@ class Gate:
         for known, gb in self._tags_gb.items():
             if known.split(":", 1)[0] == base:
                 return round(gb * 1.15, 2)
+        # heuristic for models not in any catalog (e.g. sidecar-served MLX/GGUF): read the
+        # parameter count from the name — "qwen2.5-0.5b" → 0.5B, "…-32b" → 32B — and estimate
+        # ~0.7 GB/B (4-bit-ish weights + KV headroom). Far better than the 18 GB blind default.
+        mm = re.search(r"(\d+(?:\.\d+)?)\s*b\b", ml)
+        if mm:
+            return round(max(0.3, float(mm.group(1)) * 0.7), 2)
         return self.default_est_gb
 
     # ---- budget accounting ----

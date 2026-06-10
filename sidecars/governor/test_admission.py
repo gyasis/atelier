@@ -114,6 +114,15 @@ def test_fifo_no_jump():
     print("✓ FIFO preserved — small job does not jump the queue")
 
 
+def test_est_gb_param_heuristic():
+    g = gate()
+    g.set_tags({})  # nothing catalogued → fall through to the name heuristic
+    assert g.est_gb("qwen2.5-0.5b") == 0.35, g.est_gb("qwen2.5-0.5b")
+    assert g.est_gb("something-32b") == 22.4, g.est_gb("something-32b")
+    assert g.est_gb("no-size-here") == g.default_est_gb
+    print("✓ est_gb reads parameter count from the model name")
+
+
 def test_route_honors_explicit_backend():
     g = gate()
     g.set_catalog({"ollama": ["qwen3:32b"], "mlxlm": ["qwen2.5-0.5b"]},

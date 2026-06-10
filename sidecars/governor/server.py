@@ -29,6 +29,7 @@ Exposes (itself observable — no black boxes):
   GET  /budget          (e) global LLM memory budget + active leases + wait queue
   POST /admit           (e) admission gate — grant if it fits, else queue (never evict on arrival)
   POST /release         (e) drop a lease when a job finishes/aborts
+  POST /llm/{backend}/{path}  (f) opt-in CAPTURING proxy — admit→forward→record(prompt,tokens)→release
 """
 import asyncio
 import collections
@@ -44,7 +45,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import predictor  # modular per-model ETA predictor (persistent, Bayesian)
@@ -112,7 +114,8 @@ _state = {
     "recommendation": None,   # (d) force-stop the agent should surface for human authorization
 }
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
-_recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log)
+_recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
+_proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
 # Durable task history — survives governor restarts (the in-memory deques alone
 # cleared on every restart, so Ollama tasks vanished from the dashboard).
@@ -359,8 +362,13 @@ def parse_log_line(line: str):
         if _ollama_last_stats:
             entry.update(_ollama_last_stats)
         # Dedup by timestamp — restored file-history + log backfill can overlap.
-        if not any(abs((c.get("ts") or 0) - ts) < 0.5 for c in _recent_calls):
-            _recent_calls.append(entry)
+        if any(abs((c.get("ts") or 0) - ts) < 0.5 for c in _recent_calls):
+            return
+        # The capturing proxy already recorded this call RICHLY (prompt + tokens). The GIN
+        # log line is the same call seen plainly — skip it so we keep the rich entry.
+        if any(p == m.group("path") and abs(pts - ts) < 2.0 for p, pts in _proxy_recent):
+            return
+        _recent_calls.append(entry)
         return
     m = _OFFLOAD.search(line)
     if m:
@@ -640,7 +648,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "service": "governor", "version": "0.7-admission"}
+    return {"ok": True, "service": "governor", "version": "0.8-proxy"}
 
 @app.get("/readyz")
 def readyz():
@@ -1145,3 +1153,146 @@ async def release(req: ReleaseReq):
     if not req.lease_id and not req.job_id:
         return {"ok": False, "error": "lease_id or job_id required"}
     return await gate.release(lease_id=req.lease_id, job_id=req.job_id)
+
+
+# ========== Phase 6: opt-in CAPTURING proxy ==========
+# POST /llm/{backend}/{path} → admit (wait in queue if needed) → forward to the real backend
+# → record {model, prompt, in_tok, out_tok, status, ms} into the task stream → release.
+# OPT-IN: only callers who choose this URL flow through it; direct callers are untouched.
+# Streams transparently (Ollama ndjson + OpenAI SSE), capturing the final token counts.
+PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
+
+
+def _extract_prompt(body: dict) -> str:
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        parts = []
+        for mm in msgs:
+            content = mm.get("content", "")
+            if isinstance(content, list):   # OpenAI structured content parts
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+            parts.append(f"{mm.get('role','?')}: {content}")
+        return "\n".join(parts)[:2000]
+    p = body.get("prompt")
+    return str(p)[:2000] if p else ""
+
+
+def _usage_from_obj(j: dict):
+    """Pull (in_tok, out_tok, tok_s) from an OpenAI or Ollama response object."""
+    u = j.get("usage") or {}
+    in_tok = u.get("prompt_tokens") if u.get("prompt_tokens") is not None else j.get("prompt_eval_count")
+    out_tok = u.get("completion_tokens") if u.get("completion_tokens") is not None else j.get("eval_count")
+    tok_s = None
+    if out_tok and j.get("eval_duration"):
+        try:
+            tok_s = round(out_tok / (j["eval_duration"] / 1e9), 1)
+        except Exception:
+            tok_s = None
+    return in_tok, out_tok, tok_s
+
+
+def _usage_from_stream(buf: bytes, backend: str):
+    """Parse the final token counts from a buffered stream body (best-effort)."""
+    text = buf.decode("utf-8", "ignore")
+    last = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("data:"):              # OpenAI SSE
+            line = line[5:].strip()
+            if line == "[DONE]":
+                continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("usage") or obj.get("done") or obj.get("eval_count"):
+            last = obj
+    return _usage_from_obj(last) if last else (None, None, None)
+
+
+def _record_proxy_call(path: str, model: str, backend: str, status: int,
+                       latency_s: float, in_tok, out_tok, tok_s, prompt: str):
+    ts = time.time()
+    norm = path if path.startswith("/") else "/" + path
+    entry = {"at": time.strftime("%H:%M:%S"), "ts": ts, "status": str(status),
+             "latency": f"{latency_s:.2f}s", "path": norm, "model": model,
+             "backend": backend, "via": "proxy", "prompt": prompt,
+             "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s}
+    _recent_calls.append(entry)
+    _proxy_recent.append((norm, ts))
+
+
+@app.post("/llm/{backend}/{path:path}")
+async def llm_proxy(backend: str, path: str, request: Request):
+    base = LLM_ROUTE_BASE.get(backend)
+    if not base:
+        return JSONResponse({"ok": False, "error": f"unknown backend '{backend}' "
+                             f"(use {list(LLM_ROUTE_BASE)})"}, status_code=400)
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw else {}
+    except Exception:
+        body = {}
+    model = body.get("model", "?")
+    prompt = _extract_prompt(body)
+    is_stream = bool(body.get("stream"))
+    url = f"{base}/{path}"
+    job_id = f"proxy-{backend}-{secrets.token_hex(4)}"
+
+    # Admit — wait in the queue until granted (fail-open after PROXY_MAX_WAIT_S).
+    start = time.time()
+    lease = None
+    while True:
+        d = await gate.admit(job_id, model, backend=backend)
+        if d.grant:
+            lease = d
+            break
+        if time.time() - start > PROXY_MAX_WAIT_S:
+            break   # fail-open: proceed ungated rather than hang the caller
+        await asyncio.sleep(1.0)
+
+    fwd_headers = {"content-type": request.headers.get("content-type", "application/json")}
+    t0 = time.time()
+    if is_stream:
+        media = "text/event-stream" if path.startswith("v1/") else "application/x-ndjson"
+
+        async def _gen():
+            buf = bytearray()
+            status = 0
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream("POST", url, content=raw, headers=fwd_headers) as resp:
+                        status = resp.status_code
+                        async for chunk in resp.aiter_bytes():
+                            buf.extend(chunk)
+                            yield chunk
+            finally:
+                in_tok, out_tok, tok_s = _usage_from_stream(bytes(buf), backend)
+                _record_proxy_call(path, model, backend, status or 200,
+                                   time.time() - t0, in_tok, out_tok, tok_s, prompt)
+                if lease:
+                    await gate.release(job_id=job_id)
+
+        return StreamingResponse(_gen(), media_type=media)
+
+    # Non-streaming: forward, capture exact usage, return the upstream body verbatim.
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            r = await client.post(url, content=raw, headers=fwd_headers)
+        try:
+            in_tok, out_tok, tok_s = _usage_from_obj(r.json())
+        except Exception:
+            in_tok = out_tok = tok_s = None
+        _record_proxy_call(path, model, backend, r.status_code, time.time() - t0,
+                           in_tok, out_tok, tok_s, prompt)
+        return Response(content=r.content, status_code=r.status_code,
+                        media_type=r.headers.get("content-type", "application/json"))
+    except Exception as e:
+        _record_proxy_call(path, model, backend, 502, time.time() - t0,
+                           None, None, None, prompt)
+        return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
+    finally:
+        if lease:
+            await gate.release(job_id=job_id)
