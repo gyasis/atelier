@@ -1,31 +1,26 @@
 # Active Context
 
-**Last Updated**: 2026-06-10 12:35:37
+**Last Updated**: 2026-06-10 12:48:32
 
 ## Current Focus
-fix(dashboard): donut shows real memory — label untracked 'system / other'
+fix(dashboard): make room for the routing panel (3rd row, scrollable grid)
 
-The memory donut charted only Atelier tenants and folded everything else into an
-overstated 'free' wedge, so ~20GB of real usage (OS, other apps, the dashboard,
-MLX caches) hid inside 'free' with no identifier — and the chart went stale when
-nothing was loaded, leaving a phantom segment painted on (the unidentified blue
-chunk the user circled: an already-unloaded model still drawn).
-
-Now: segments = tenants + a labeled grey 'system / other' wedge for real-but-
-untracked memory (resident_gb − tenant_sum) + ACTUAL free_gb. Always redraws, so
-no stale phantom. Confirmed via redpen: donut said 'free 58GB' while real free
-was ~39GB; the missing ~19GB now shows as 'system / other'.
+The grid was a fixed 12-row viewport (maxRow=12, overflow hidden) with both rows
+full, so the new routing panel at row 12 wouldn't render. Decouple cell height
+from row count: VIS_ROWS=12 sizes the cells (existing panels keep their size),
+ROWS=17 raises maxRow so the routing row fits below, and .grid-stack scrolls
+(overflow-y:auto) to reach it.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## Recent Changes
 ```
- .../activity_stream.md   |   12 +
- .../snapshot_latest.json |    2 +-
- ...026-06-10-37bba2bb.md | 1046 +++++-
- .../activeContext.md     |   39 +-
- .../progress.md          |    2 +-
- 5 files changed, 1073 insertions(+), 28 deletions(-)
+ .../activity_stream.md    |  12 +
+ .../snapshot_latest.json  |   2 +-
+ ...2026-06-10-37bba2bb.md | 551 +++++-
+ .../activeContext.md      |  30 +-
+ .../progress.md           |   2 +-
+ 5 files changed, 574 insertions(+), 23 deletions(-)
 ```
 
 ## Modified Files
