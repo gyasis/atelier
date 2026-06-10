@@ -116,6 +116,7 @@ _state = {
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
 _proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
+_internal_skip = collections.deque(maxlen=50)   # (path, ts) the governor's OWN probe fired — skip its GIN line
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
 # Durable task history — survives governor restarts (the in-memory deques alone
 # cleared on every restart, so Ollama tasks vanished from the dashboard).
@@ -368,6 +369,11 @@ def parse_log_line(line: str):
         # log line is the same call seen plainly — skip it so we keep the rich entry.
         if any(p == m.group("path") and abs(pts - ts) < 2.0 for p, pts in _proxy_recent):
             return
+        # The governor's OWN benchmark probe is an /api/generate — recorded separately and
+        # labeled. Skip its raw GIN line so it can't masquerade as user traffic (and can't
+        # re-trigger the stats watcher into a self-perpetuating probe loop).
+        if any(p == m.group("path") and abs(pts - ts) < 3.0 for p, pts in _internal_skip):
+            return
         _recent_calls.append(entry)
         return
     m = _OFFLOAD.search(line)
@@ -550,14 +556,15 @@ async def _ollama_stats_watcher():
         while True:
             await asyncio.sleep(0.5)
             try:
-                # Check if a new call completed since our last probe
-                if _recent_calls:
-                    latest = _recent_calls[-1]
+                # Only REAL calls (not our own probes) should trigger a fresh probe. Excluding
+                # via="governor-probe" entries is what breaks the self-perpetuating loop that
+                # used to fire every PROBE_COOLDOWN seconds and pin the last model resident.
+                real_calls = [c for c in _recent_calls if c.get("via") != "governor-probe"]
+                if real_calls:
+                    latest = real_calls[-1]
                     call_ts = latest.get("ts", 0)
                     mono = time.monotonic()
-                    # Cooldown breaks the runaway: at most one probe per window,
-                    # however many calls (real or self-induced) show up.
-                    if (call_ts > last_call_ts and latest.get("status") == "200"
+                    if (call_ts > last_call_ts and str(latest.get("status")) == "200"
                             and mono - last_probe_ts >= PROBE_COOLDOWN):
                         last_call_ts = call_ts
                         last_probe_ts = mono
@@ -567,15 +574,24 @@ async def _ollama_stats_watcher():
                         if not models:
                             continue
                         model_name = models[0].get("name", "")
-                        # Fire a tiny probe (8 tokens) to get fresh eval stats for this model
+                        # Fire a tiny probe (8 tokens) for fresh eval stats. The probe follows a
+                        # REAL call (loop now broken), so mirror a normal call's keep-alive — it
+                        # neither pins an idle model (it only fires after real traffic) nor evicts
+                        # one mid-conversation. The model expires ~5m after the last real use.
                         probe = await client.post(f"{OLLAMA_URL}/api/generate",
                             json={"model": model_name, "prompt": "Hi", "stream": False,
                                   "options": {"num_predict": 8}, "keep_alive": "5m"},
                             timeout=30)
-                        # Consume EVERY call logged so far — including this probe's own
-                        # GIN line once it lands — so the probe can't re-trigger us.
-                        if _recent_calls:
-                            last_call_ts = max(c.get("ts", 0) for c in _recent_calls)
+                        # Record the probe as a LABELED, visible entry (so the dashboard shows
+                        # exactly what the governor is doing) AND mark its GIN line to be skipped.
+                        _now = time.time()
+                        _recent_calls.append({
+                            "at": time.strftime("%H:%M:%S"), "ts": _now, "status": "200",
+                            "latency": "—", "path": "/api/generate", "model": model_name,
+                            "backend": "ollama", "via": "governor-probe",
+                            "prompt": f"▣ governor warm-up/benchmark probe for {model_name} (num_predict=8)",
+                        })
+                        _internal_skip.append(("/api/generate", _now))
                         if probe.status_code == 200:
                             d = probe.json()
                             ec = d.get("eval_count", 0)
