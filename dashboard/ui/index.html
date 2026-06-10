@@ -799,24 +799,33 @@ async function refreshAll() {
   }
   updateSidecarTable(enriched);
 
-  // -- Pie chart (loaded now) — use enriched list with real mem_gb --
+  // -- Pie chart (loaded now): honest memory breakdown --
+  // Atelier tenants + a labeled "system / other" wedge for REAL-but-untracked memory
+  // (OS, other apps, the dashboard, MLX caches) + ACTUAL free. Previously the donut
+  // charted only tenants and called everything else "free", so ~20GB of real usage
+  // hid inside an overstated "free" wedge with no identifier. Always redraws (even with
+  // nothing loaded) so it can't go stale and leave a phantom segment painted on.
   const loaded = enriched.filter(t => t.mem_gb > 0);
   const pc = Chart.getChart('pieChart');
   const PALETTE = ['#C8A96E','#6E86C8','#A98B5C','#5FA86B','#C99A52','#9B6EC8','#D9C091','#63A0A8'];
   const FREE_COLOR = '#26251F';
-  if (pc && loaded.length) {
-    const gb = loaded.map(t => t.mem_gb);
-    const free = Math.max(0, 64 - gb.reduce((a,b)=>a+b,0));
-    const segColors = loaded.map((_,i) => PALETTE[i % PALETTE.length]);
-    pc.data.datasets[0].data = [...gb, free];
-    pc.data.labels = [...loaded.map(t=>t.name), 'free'];
-    pc.data.datasets[0].backgroundColor = [...segColors, FREE_COLOR];   // <-- color the donut to match the legend
+  const OTHER_COLOR = '#454751';   // slate grey — deliberately NOT a tenant colour
+  if (pc) {
+    const residentGb = pressure?.resident_gb ?? 0;
+    const freeGb = Math.max(0, pressure?.free_gb ?? 0);
+    const tenantSum = loaded.reduce((a,t)=>a+(t.mem_gb||0),0);
+    // Real usage not attributable to any Atelier tenant. Floor at 0 (estimates can drift).
+    const other = Math.max(0, residentGb - tenantSum);
+    const segs = loaded.map((t,i) => ({ name: t.name, gb: t.mem_gb, c: PALETTE[i % PALETTE.length] }));
+    if (other > 0.3) segs.push({ name: 'system / other', gb: other, c: OTHER_COLOR });
+    segs.push({ name: 'free', gb: freeGb, c: FREE_COLOR });
+    pc.data.datasets[0].data = segs.map(s => +(s.gb||0).toFixed(1));
+    pc.data.labels = segs.map(s => s.name);
+    pc.data.datasets[0].backgroundColor = segs.map(s => s.c);
     pc.update('none');
     const legendEl = document.getElementById('pieLegend');
-    if (legendEl) legendEl.innerHTML = [
-      ...loaded.map((t,i) => ({ name: t.name, gb: t.mem_gb, c: segColors[i] })),
-      { name: 'free', gb: free, c: FREE_COLOR },
-    ].map(r => `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
+    if (legendEl) legendEl.innerHTML = segs.map(r =>
+      `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
   }
 
   // -- Telemetry --
