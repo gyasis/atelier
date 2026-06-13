@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781353985",
+  "timestamp": "2026-06-13T14:33:05+02:00",
+  "mental_state": "feat(proxy): auto-size num_ctx to the prompt (stop silent truncation)
+
+The 16K context cap silently truncates long inputs (e.g. whisper summarizing a
+long transcript — the tail just vanishes). The capturing proxy now estimates the
+prompt's token count and, for Ollama chat/generate, grows num_ctx to fit — next",
+  "current_phase": "feat(proxy): auto-size num_ctx to the prompt (stop silent truncation)",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["b7c534f0184e0989da097ed8959ec6d15f2063bf"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}
