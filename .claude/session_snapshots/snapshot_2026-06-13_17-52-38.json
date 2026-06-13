@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781365958",
+  "timestamp": "2026-06-13T17:52:38+02:00",
+  "mental_state": "feat(governor): /agent discovery advertises the gate, proxy, and docs
+
+The hub manifest (GET /agent, ?expand=true) is the single entry point an agent
+hits to learn Atelier — but it predated this session's work. Now it advertises:
+- llm_access: the SMART FRONT DOOR (POST /llm/{backend}/{path}) with backends,",
+  "current_phase": "feat(governor): /agent discovery advertises the gate, proxy, and docs",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["21a03571e1cd3aa1fbefb7be9fb6eef84b857fd3"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}

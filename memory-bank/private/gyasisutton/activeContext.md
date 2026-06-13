@@ -1,34 +1,32 @@
 # Active Context
 
-**Last Updated**: 2026-06-13 14:33:05
+**Last Updated**: 2026-06-13 17:52:38
 
 ## Current Focus
-feat(proxy): auto-size num_ctx to the prompt (stop silent truncation)
+feat(governor): /agent discovery advertises the gate, proxy, and docs
 
-The 16K context cap silently truncates long inputs (e.g. whisper summarizing a
-long transcript — the tail just vanishes). The capturing proxy now estimates the
-prompt's token count and, for Ollama chat/generate, grows num_ctx to fit — next
-power of two, bounded by ATELIER_PROXY_CTX_CEILING (32768) and the model's native
-max (from /api/show, cached). Short prompts stay at the cheap 16K; a caller's own
-num_ctx is always respected. The chosen window is recorded in telemetry and shown
-in the dashboard hover ('context window: 32768 (auto-sized)').
+The hub manifest (GET /agent, ?expand=true) is the single entry point an agent
+hits to learn Atelier — but it predated this session's work. Now it advertises:
+- llm_access: the SMART FRONT DOOR (POST /llm/{backend}/{path}) with backends,
+  examples, the manual /admit·/release gate, and the clients/atelier_admit.py helper
+- control_plane: adds /llm, /budget, /admit, /release alongside the existing routes
+- docs: pointers to SIDECAR_CALLS.md (curl cookbook) and LLM_ADMISSION_QUEUE.md
+- how_to_start: rewritten to steer agents to /llm (admit+autoctx+capture) for LLMs
+  and direct sidecar calls for TTS/ASR
 
-Verified live: an ~18.2K-token prompt ingested fully (prompt_eval_count=18217)
-with the runner reloaded at n_ctx=32768 — previously it would have clipped to 16384.
-
-Note: the gate's est_gb doesn't yet add the larger KV footprint of a grown ctx;
-the live-memory backstop still prevents OOM (holds/queues if real RAM is short).
+So a discovering agent learns the memory-aware way to use the hub, not just the
+raw backends. ?expand=true still inlines every sidecar's full method manifest.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## Recent Changes
 ```
- .../activity_stream.md    |  12 +
- .../snapshot_latest.json  |   2 +-
- ...2026-06-10-37bba2bb.md | 121 +++++-
- .../activeContext.md      |  32 +-
- .../progress.md           |   2 +-
- 5 files changed, 153 insertions(+), 16 deletions(-)
+ .claude/activity_stream.md          |  12 +
+ .../snapshot_latest.json            |   2 +-
+ .../history/2026-06-10-37bba2bb.md  | 539 +++++++++++-
+ .../gyasisutton/activeContext.md    |  37 +-
+ .../private/gyasisutton/progress.md |   2 +-
+ 5 files changed, 567 insertions(+), 25 deletions(-)
 ```
 
 ## Modified Files
