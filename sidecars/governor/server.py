@@ -1179,6 +1179,62 @@ async def release(req: ReleaseReq):
 # Streams transparently (Ollama ndjson + OpenAI SSE), capturing the final token counts.
 PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
 
+# --- auto-size num_ctx to the prompt (so long inputs aren't silently truncated) ---
+PROXY_CTX_DEFAULT = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384"))  # the cheap baseline window
+PROXY_CTX_CEILING = int(os.environ.get("ATELIER_PROXY_CTX_CEILING", "32768"))  # don't grow past this
+CHARS_PER_TOKEN = float(os.environ.get("ATELIER_CHARS_PER_TOKEN", "3.5"))  # rough, overestimates slightly
+_native_ctx_cache: dict[str, int] = {}
+
+
+async def _native_ctx(model: str) -> int:
+    """The model's native max context (from /api/show), cached. 0 if unknown."""
+    if model in _native_ctx_cache:
+        return _native_ctx_cache[model]
+    val = 0
+    try:
+        async with httpx.AsyncClient(timeout=4) as c:
+            d = (await c.post(f"{OLLAMA_URL}/api/show", json={"model": model})).json()
+        info = d.get("model_info", {}) or {}
+        val = int(next((v for k, v in info.items() if k.endswith("context_length")), 0) or 0)
+    except Exception:
+        val = 0
+    if val:
+        _native_ctx_cache[model] = val
+    return val
+
+
+def _prompt_chars(body: dict) -> int:
+    """Total characters of the FULL prompt (untruncated) — for token estimation."""
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        total = 0
+        for mm in msgs:
+            content = mm.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+            total += len(str(content))
+        return total
+    return len(str(body.get("prompt", "")))
+
+
+def _autosize_ctx(body: dict, native_max: int, prompt_chars: int) -> int | None:
+    """If the estimated prompt won't fit the default window, return a larger num_ctx
+    (next power of two, bounded by the ceiling and the model's native max). None = leave
+    the default. Respects a caller-supplied num_ctx."""
+    opts = body.get("options") or {}
+    if opts.get("num_ctx"):                      # caller decided — never override
+        return None
+    reserve = max(1024, int(opts.get("num_predict") or 0))   # room for the response
+    est = int(prompt_chars / CHARS_PER_TOKEN) + reserve
+    if est <= PROXY_CTX_DEFAULT:                 # fits the cheap window → leave it
+        return None
+    target = PROXY_CTX_DEFAULT
+    while target < est:
+        target *= 2
+    ceiling = min(PROXY_CTX_CEILING, native_max) if native_max else PROXY_CTX_CEILING
+    target = min(target, ceiling)
+    return target if target > PROXY_CTX_DEFAULT else None
+
 
 def _extract_prompt(body: dict) -> str:
     msgs = body.get("messages")
@@ -1230,13 +1286,14 @@ def _usage_from_stream(buf: bytes, backend: str):
 
 
 def _record_proxy_call(path: str, model: str, backend: str, status: int,
-                       latency_s: float, in_tok, out_tok, tok_s, prompt: str):
+                       latency_s: float, in_tok, out_tok, tok_s, prompt: str,
+                       num_ctx=None):
     ts = time.time()
     norm = path if path.startswith("/") else "/" + path
     entry = {"at": time.strftime("%H:%M:%S"), "ts": ts, "status": str(status),
              "latency": f"{latency_s:.2f}s", "path": norm, "model": model,
              "backend": backend, "via": "proxy", "prompt": prompt,
-             "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s}
+             "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s, "num_ctx": num_ctx}
     _recent_calls.append(entry)
     _proxy_recent.append((norm, ts))
 
@@ -1257,6 +1314,17 @@ async def llm_proxy(backend: str, path: str, request: Request):
     is_stream = bool(body.get("stream"))
     url = f"{base}/{path}"
     job_id = f"proxy-{backend}-{secrets.token_hex(4)}"
+
+    # Auto-size the context window to the prompt so long inputs aren't silently truncated
+    # at the cheap default. Ollama-only (num_ctx is Ollama's knob); OpenAI sidecars manage
+    # their own context. If we grow it, re-serialize the body so the runner gets num_ctx.
+    chosen_ctx = None
+    if backend == "ollama" and path in ("api/chat", "api/generate"):
+        native = await _native_ctx(model)
+        chosen_ctx = _autosize_ctx(body, native, _prompt_chars(body))
+        if chosen_ctx:
+            body.setdefault("options", {})["num_ctx"] = chosen_ctx
+            raw = json.dumps(body).encode()
 
     # Admit — wait in the queue until granted (fail-open after PROXY_MAX_WAIT_S).
     start = time.time()
@@ -1288,7 +1356,8 @@ async def llm_proxy(backend: str, path: str, request: Request):
             finally:
                 in_tok, out_tok, tok_s = _usage_from_stream(bytes(buf), backend)
                 _record_proxy_call(path, model, backend, status or 200,
-                                   time.time() - t0, in_tok, out_tok, tok_s, prompt)
+                                   time.time() - t0, in_tok, out_tok, tok_s, prompt,
+                                   num_ctx=chosen_ctx)
                 if lease:
                     await gate.release(job_id=job_id)
 
@@ -1303,12 +1372,12 @@ async def llm_proxy(backend: str, path: str, request: Request):
         except Exception:
             in_tok = out_tok = tok_s = None
         _record_proxy_call(path, model, backend, r.status_code, time.time() - t0,
-                           in_tok, out_tok, tok_s, prompt)
+                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx)
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "application/json"))
     except Exception as e:
         _record_proxy_call(path, model, backend, 502, time.time() - t0,
-                           None, None, None, prompt)
+                           None, None, None, prompt, num_ctx=chosen_ctx)
         return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
     finally:
         if lease:
