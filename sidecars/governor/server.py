@@ -729,36 +729,64 @@ async def agent(expand: bool = False):
             sidecars[n]["manifest"] = manifest
     return {
         "service": "atelier-governor",
-        "role": "hub supervisor — memory governor, telemetry, ETA predictor",
-        "summary": "One LAN inference hub on a Mac Studio. The governor watches "
-                   "unified-memory pressure across Ollama + sidecars, evicts idle "
-                   "models to make room, records every run, and predicts ETAs.",
-        "tip": "GET /agent?expand=true to inline every sidecar's full manifest in "
-               "one fetch (no follow-up calls).",
+        "role": "hub supervisor — memory governor, LLM admission gate, telemetry, ETA predictor",
+        "summary": "One LAN inference hub on a Mac Studio. The governor watches unified-memory "
+                   "pressure across Ollama + sidecars, ADMITS/QUEUES LLM work so jobs share "
+                   "memory instead of evicting each other, captures every proxied call, and "
+                   "predicts ETAs.",
+        "tip": "GET /agent?expand=true to inline every sidecar's full manifest in one fetch.",
         "how_to_start": (
-            "1) GET /agent?expand=true — one round-trip gives you the whole hub: "
-            "control plane + every sidecar's full method list.\n"
-            "2) GET /pressure — see what's loaded, memory level, and per-tenant "
-            "state (busy/idle/cold) right now.\n"
-            "3) Before a heavy job, check /pressure.level; if 'alarm', POST "
-            "/make-room to evict idle models. Use /estimate for an ETA first.\n"
-            "4) After a run, POST /report so the predictor sharpens."
+            "1) GET /agent?expand=true — one round-trip: control plane + every sidecar's methods.\n"
+            "2) To run an LLM, prefer the SMART FRONT DOOR: POST /llm/{backend}/{path} "
+            "(backend = ollama|mlxlm|llamacpp). It admits you into the global memory queue "
+            "(waits under pressure instead of OOM-ing or evicting a running model), auto-sizes "
+            "the context to your prompt (no silent truncation), captures prompt+tokens, and "
+            "forwards. Body = the backend's native schema (Ollama /api/chat or OpenAI "
+            "/v1/chat/completions). E.g. POST /llm/ollama/api/chat {model, messages[]}.\n"
+            "3) For TTS/ASR call the sidecar directly — see sidecars[] and docs.sidecar_calls.\n"
+            "4) GET /pressure or /budget for memory + the queue; GET /estimate for an ETA.\n"
+            "5) After a run, POST /report so the predictor sharpens."
         ),
+        "llm_access": {
+            "recommended": "POST /llm/{backend}/{path}",
+            "what_it_does": "memory admission (queues under pressure, never evicts a running "
+                            "model on arrival) + auto num_ctx sizing + prompt/token capture + routing",
+            "backends": list(LLM_ROUTE_BASE),
+            "examples": {
+                "ollama": "POST /llm/ollama/api/chat  {model, messages:[...]}",
+                "mlxlm/llamacpp (OpenAI)": "POST /llm/mlxlm/v1/chat/completions  {model, messages:[...]}",
+            },
+            "manual_gate": {
+                "POST /admit": "{job_id, model, backend?=auto, est_gb?} → "
+                               "grant{lease_id, backend, base_url} | queued{position}",
+                "POST /release": "{lease_id|job_id} — drop the lease when the job finishes",
+                "note": "only needed if you call a backend DIRECTLY; /llm does admit+release for you",
+            },
+            "client_helper": "clients/atelier_admit.py — `async with admission(model=..., backend='auto')`",
+        },
         "control_plane": {
             "GET /pressure": "live memory level + tenants[] (busy/idle/cold, jobs, queue)",
-            "GET /telemetry": "recent inference calls, synths (incl. [asr]), events",
-            "GET /estimate": "ETA for a job — ?engine=whisper&audio_s=N (asr) | "
-                             "?engine=<tts>&chars=N | ?model=<llm>&out_tokens=N",
+            "GET /budget": "LLM admission budget — committed vs budget, leases per backend, wait queue",
+            "GET /telemetry": "recent calls (prompt+tokens for proxied), synths (incl. [asr]), events",
+            "GET /estimate": "ETA for a job — ?engine=whisper&audio_s=N | ?engine=<tts>&chars=N | "
+                             "?model=<llm>&out_tokens=N",
             "GET /predictor/stats": "learned per-(kind,model) compute stats",
             "POST /report": "feed a completed run into the predictor",
+            "POST /llm/{backend}/{path}": "capturing proxy — the recommended way to run LLMs",
+            "POST /admit · POST /release": "manual memory lease (the proxy does this for you)",
             "POST /make-room": "evict ONLY idle models to free memory",
             "POST /force-stop": "human-gated preempt of a BUSY model",
         },
         "sidecars": sidecars,
         "ollama": {"base_url": OLLAMA_URL, "role": "LLM + embeddings + VLM",
-                   "list_loaded": f"{OLLAMA_URL}/api/ps"},
-        "notes": "LAN-only. One model per sidecar is resident at a time; unified "
-                 "memory (64 GB) is the scarce resource — respect /pressure.",
+                   "list_loaded": f"{OLLAMA_URL}/api/ps",
+                   "via_gate": "prefer POST /llm/ollama/... so calls are admitted + captured"},
+        "docs": {
+            "sidecar_calls": "docs/SIDECAR_CALLS.md — curl cookbook for every sidecar",
+            "admission_queue": "docs/LLM_ADMISSION_QUEUE.md — the memory gate + proxy design",
+        },
+        "notes": "LAN-only. Unified memory (~64 GB) is the scarce resource — prefer /llm so the "
+                 "gate can pack jobs and QUEUE overflow instead of evicting/OOM-ing. Respect /pressure.",
     }
 
 @app.get("/telemetry")
