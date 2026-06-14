@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""atelier — CLI for the Atelier inference hub.
+
+`atelier discover` scans the hub via the governor's self-describing /agent manifest
+and prints what's available + how to call it. No dependencies (stdlib only).
+
+  atelier discover            # the hub: LLM front door, control plane, sidecars
+  atelier discover <name>     # drill into one sidecar's methods/params (e.g. whisper)
+  atelier discover --json     # raw manifest JSON (for piping/jq)
+  atelier discover --plain    # no colour
+
+Env: ATELIER_GOVERNOR_URL (default http://127.0.0.1:8799)
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.request
+
+GOV = os.environ.get("ATELIER_GOVERNOR_URL", "http://127.0.0.1:8799").rstrip("/")
+
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _c(s, code):
+    return f"\033[{code}m{s}\033[0m" if _USE_COLOR else str(s)
+
+def bold(s):  return _c(s, "1")
+def gold(s):  return _c(s, "38;5;179")
+def dim(s):   return _c(s, "2")
+def green(s): return _c(s, "32")
+def cyan(s):  return _c(s, "36")
+
+
+def _get(path, timeout=8):
+    req = urllib.request.Request(f"{GOV}{path}")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def _fetch_manifest(expand):
+    try:
+        return _get("/agent?expand=true" if expand else "/agent")
+    except Exception as e:
+        sys.exit(f"✗ governor unreachable at {GOV} ({e})\n  start it, or set ATELIER_GOVERNOR_URL.")
+
+
+def discover(args):
+    expand = bool(args.name) or args.json
+    d = _fetch_manifest(expand)
+
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return
+
+    # Drill into one sidecar
+    if args.name:
+        sc = (d.get("sidecars") or {}).get(args.name)
+        if not sc:
+            avail = ", ".join((d.get("sidecars") or {}).keys())
+            sys.exit(f"✗ no sidecar '{args.name}'. Available: {avail}")
+        print(f"\n{bold(gold(args.name))}  {dim(sc.get('role',''))}")
+        print(f"  {dim('base')}  {sc.get('base_url','')}")
+        man = sc.get("manifest") or {}
+        if man.get("unavailable"):
+            print(f"  {dim(man['unavailable'])}")
+            return
+        methods = man.get("methods") or []
+        for m in methods if isinstance(methods, list) else []:
+            if not isinstance(m, dict):
+                continue
+            http = m.get("http") or m.get("path") or ""
+            print(f"\n  {green(m.get('name','?'))}  {cyan(http)}")
+            params = m.get("params")
+            if isinstance(params, dict):
+                for k, v in params.items():
+                    print(f"      {bold(k):<28} {dim(str(v)[:80])}")
+            elif params:
+                print(f"      {dim(str(params)[:100])}")
+            if m.get("example"):
+                print(f"      {dim('e.g. ' + str(m['example'])[:120])}")
+        for extra in ("voices", "models", "input_modes", "openai_base_url"):
+            if man.get(extra):
+                print(f"\n  {dim(extra)}: {json.dumps(man[extra])[:160]}")
+        return
+
+    # Hub overview
+    print(f"\n{bold(gold(d.get('service','atelier')))}  —  {d.get('role','')}")
+    print(f"{dim(d.get('summary',''))}\n")
+
+    llm = d.get("llm_access") or {}
+    if llm:
+        print(bold("LLM — smart front door"))
+        print(f"  {green(llm.get('recommended',''))}")
+        print(f"  {dim(llm.get('what_it_does',''))}")
+        for label, ex in (llm.get("examples") or {}).items():
+            print(f"    {dim(label+':'):<32} {cyan(ex)}")
+        if llm.get("client_helper"):
+            print(f"  {dim('python helper: ' + llm['client_helper'])}")
+        print()
+
+    cp = d.get("control_plane") or {}
+    if cp:
+        print(bold("Control plane"))
+        for ep, desc in cp.items():
+            print(f"  {cyan(ep):<42} {dim(desc)[:200] if not _USE_COLOR else dim(desc)}")
+        print()
+
+    sidecars = d.get("sidecars") or {}
+    if sidecars:
+        print(bold(f"Sidecars ({len(sidecars)})") + dim("  —  `atelier discover <name>` for methods"))
+        for name, sc in sidecars.items():
+            print(f"  {green(name):<26} {dim(sc.get('role',''))}")
+        print()
+
+    docs = d.get("docs") or {}
+    if docs:
+        print(bold("Docs"))
+        for _, v in docs.items():
+            print(f"  {dim(v)}")
+        print()
+
+    if d.get("how_to_start"):
+        print(bold("How to start"))
+        for line in str(d["how_to_start"]).split("\n"):
+            print(f"  {line}")
+        print()
+
+
+def main():
+    p = argparse.ArgumentParser(prog="atelier", description="Atelier inference-hub CLI")
+    sub = p.add_subparsers(dest="cmd")
+    dp = sub.add_parser("discover", help="scan the hub: services + how to call them")
+    dp.add_argument("name", nargs="?", help="a sidecar to drill into (e.g. whisper)")
+    dp.add_argument("--json", action="store_true", help="raw manifest JSON")
+    dp.add_argument("--plain", action="store_true", help="disable colour")
+    dp.set_defaults(func=discover)
+    args = p.parse_args()
+    if args.plain:
+        global _USE_COLOR
+        _USE_COLOR = False
+    if not getattr(args, "func", None):
+        p.print_help()
+        sys.exit(0)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
