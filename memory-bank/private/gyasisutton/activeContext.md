@@ -1,21 +1,19 @@
 # Active Context
 
-**Last Updated**: 2026-06-13 17:52:38
+**Last Updated**: 2026-06-14 18:44:52
 
 ## Current Focus
-feat(governor): /agent discovery advertises the gate, proxy, and docs
+feat(cli): add 'atelier discover' — human-friendly hub discovery
 
-The hub manifest (GET /agent, ?expand=true) is the single entry point an agent
-hits to learn Atelier — but it predated this session's work. Now it advertises:
-- llm_access: the SMART FRONT DOOR (POST /llm/{backend}/{path}) with backends,
-  examples, the manual /admit·/release gate, and the clients/atelier_admit.py helper
-- control_plane: adds /llm, /budget, /admit, /release alongside the existing routes
-- docs: pointers to SIDECAR_CALLS.md (curl cookbook) and LLM_ADMISSION_QUEUE.md
-- how_to_start: rewritten to steer agents to /llm (admit+autoctx+capture) for LLMs
-  and direct sidecar calls for TTS/ASR
+Stdlib-only CLI wrapping the governor's /agent manifest:
+  atelier discover         hub overview — LLM front door, control plane, sidecars, docs
+  atelier discover <name>  drill into one sidecar's methods/params + curl examples
+  atelier discover --json  raw manifest (pipeable to jq)
+  atelier discover --plain no colour
 
-So a discovering agent learns the memory-aware way to use the hub, not just the
-raw backends. ?expand=true still inlines every sidecar's full method manifest.
+Reads ATELIER_GOVERNOR_URL (default :8799); clean error if the governor is down.
+Installed by symlinking cli/atelier into ~/.local/bin (matches the gentle-eye CLI
+convention). Same data an agent gets from GET /agent?expand=true, formatted for a human.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -23,10 +21,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 ```
  .claude/activity_stream.md          |  12 +
  .../snapshot_latest.json            |   2 +-
- .../history/2026-06-10-37bba2bb.md  | 539 +++++++++++-
- .../gyasisutton/activeContext.md    |  37 +-
+ .../history/2026-06-10-37bba2bb.md  | 270 +++++++++++-
+ .../gyasisutton/activeContext.md    |  33 +-
  .../private/gyasisutton/progress.md |   2 +-
- 5 files changed, 567 insertions(+), 25 deletions(-)
+ 5 files changed, 296 insertions(+), 23 deletions(-)
 ```
 
 ## Modified Files
