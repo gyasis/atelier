@@ -72,11 +72,18 @@ class Gate:
     def __init__(self, *, budget_gb: float, default_est_gb: float = 18.0,
                  num_parallel: int = 1, est_overrides: dict[str, float] | None = None,
                  default_ttl_s: float = 900.0, cliff_gb: float | None = None,
-                 live_floor_gb: float = 4.0):
+                 live_floor_gb: float = 4.0, default_est_ctx: int = 16384):
         self.budget_gb = float(budget_gb)
         self.default_est_gb = float(default_est_gb)
         self.num_parallel = max(1, int(num_parallel))
         self.default_ttl_s = float(default_ttl_s)
+        # KV-cache accounting: weights + (per-token KV × context). _kv_rate is GB/token,
+        # fed per-model by the server (computed from /api/show architecture). When the
+        # context grows (the proxy auto-sizes it), the reserved est grows with it — so the
+        # budget math tracks reality instead of a flat markup. default_est_ctx is the window
+        # assumed when a caller doesn't say (the cheap baseline).
+        self._kv_rate: dict[str, float] = {}
+        self.default_est_ctx = int(default_est_ctx)
         # HARD crash backstop: never grant if measured memory says it's unsafe, regardless
         # of the gate's own est accounting (which can drift from reality). The user has
         # crashed the machine on RAM overload before — this is the real safety net.
@@ -158,6 +165,31 @@ class Gate:
         the gate). Counted against the budget so the gate stays honest under bypass."""
         self._untracked_gb = max(0.0, float(gb))
 
+    def set_kv_rate(self, model: str, gb_per_token: float) -> None:
+        """Per-token KV-cache cost (GB) for a model — from its architecture (layers ×
+        kv-heads × head-dim × dtype). Lets est_gb scale with the context window."""
+        if gb_per_token and gb_per_token > 0:
+            self._kv_rate[model] = float(gb_per_token)
+
+    def _kv_rate_for(self, model: str) -> float:
+        if model in self._kv_rate:
+            return self._kv_rate[model]
+        base = model.split(":", 1)[0] if model else ""
+        for known, r in self._kv_rate.items():
+            if known.split(":", 1)[0] == base:
+                return r
+        return 0.0
+
+    def weights_gb(self, model: str) -> float:
+        """Raw model-weight GB (from /api/tags), exact then base-name match. 0 if unknown."""
+        if model in self._tags_gb:
+            return self._tags_gb[model]
+        base = model.split(":", 1)[0] if model else ""
+        for known, gb in self._tags_gb.items():
+            if known.split(":", 1)[0] == base:
+                return gb
+        return 0.0
+
     def untracked_from(self, loaded: list[dict]) -> float:
         """Given backends' currently-loaded models [{backend, model, gb}], sum the GB of
         those with NO matching active lease — i.e. load that bypassed the gate. Read-only
@@ -167,20 +199,23 @@ class Gate:
                          if (x.get("backend", "ollama"), x.get("model")) not in leased), 2)
 
     # ---- estimation ----
-    def est_gb(self, model: str, hint: float | None = None) -> float:
+    def est_gb(self, model: str, hint: float | None = None, ctx: int | None = None) -> float:
+        """Estimated resident footprint = weights + KV(context). `ctx` is the context window
+        this call will use (the proxy passes the auto-sized value); defaults to default_est_ctx.
+        When per-model KV rate is known the KV term scales with ctx; otherwise it falls back to
+        a flat 15% markup."""
         if hint and hint > 0:
             return float(hint)
         ml = (model or "").lower()
         for needle, gb in self.est_overrides.items():
             if needle in ml:
                 return gb
-        if model in self._tags_gb:
-            return round(self._tags_gb[model] * 1.15, 2)   # weights + ~15% KV at capped ctx
-        # try base name without a :tag
-        base = model.split(":", 1)[0] if model else ""
-        for known, gb in self._tags_gb.items():
-            if known.split(":", 1)[0] == base:
-                return round(gb * 1.15, 2)
+        w = self.weights_gb(model)
+        if w:
+            c = int(ctx) if ctx else self.default_est_ctx
+            rate = self._kv_rate_for(model)
+            kv = rate * c if rate else w * 0.15        # exact KV if we know the arch, else flat
+            return round(w + kv + 0.3, 2)              # +0.3 GB runtime/activation overhead
         # heuristic for models not in any catalog (e.g. sidecar-served MLX/GGUF): read the
         # parameter count from the name — "qwen2.5-0.5b" → 0.5B, "…-32b" → 32B — and estimate
         # ~0.7 GB/B (4-bit-ish weights + KV headroom). Far better than the 18 GB blind default.

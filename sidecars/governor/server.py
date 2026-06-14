@@ -105,7 +105,8 @@ LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
 gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,
                       num_parallel=LLM_NUM_PARALLEL, est_overrides=_EST_OVERRIDES,
                       default_ttl_s=LLM_LEASE_TTL_S, cliff_gb=CLIFF_GB,
-                      live_floor_gb=LLM_LIVE_FLOOR_GB)
+                      live_floor_gb=LLM_LIVE_FLOOR_GB,
+                      default_est_ctx=int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384")))
 
 _state = {
     "updated_at": None, "level": "ok", "free_gb": None, "resident_gb": None,
@@ -331,7 +332,12 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
         if be in _sidecar_models and st not in (None, "cold", "unreachable"):
             loaded_set.add((be, _sidecar_models[be]))
     gate.set_loaded(loaded_set)
-    # (e) backstop reaper for dead clients
+    # (e) warm KV rate for loaded Ollama models so DIRECT /admit callers also get accurate
+    # est (cached after first fetch — just dict hits thereafter).
+    for x in loaded:
+        if x["model"] not in _ollama_meta_cache:
+            await _ollama_meta(x["model"])
+    # (f) backstop reaper for dead clients
     await gate.reap(now)
 
 # ---------- Ollama log tailer ----------
@@ -1211,24 +1217,40 @@ PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
 PROXY_CTX_DEFAULT = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384"))  # the cheap baseline window
 PROXY_CTX_CEILING = int(os.environ.get("ATELIER_PROXY_CTX_CEILING", "32768"))  # don't grow past this
 CHARS_PER_TOKEN = float(os.environ.get("ATELIER_CHARS_PER_TOKEN", "3.5"))  # rough, overestimates slightly
-_native_ctx_cache: dict[str, int] = {}
+KV_DTYPE_BYTES = float(os.environ.get("ATELIER_KV_DTYPE_BYTES", "2"))      # f16 KV cache = 2 bytes/elem
+_ollama_meta_cache: dict[str, dict] = {}
 
 
-async def _native_ctx(model: str) -> int:
-    """The model's native max context (from /api/show), cached. 0 if unknown."""
-    if model in _native_ctx_cache:
-        return _native_ctx_cache[model]
-    val = 0
+async def _ollama_meta(model: str) -> dict:
+    """{native_ctx, kv_rate} for an Ollama model, from /api/show architecture. kv_rate is
+    GB of KV cache per token = 2(K+V) × layers × kv_heads × head_dim × dtype_bytes. Cached;
+    feeds the gate's per-model KV rate so est_gb scales with the chosen context window."""
+    if model in _ollama_meta_cache:
+        return _ollama_meta_cache[model]
+    meta = {"native_ctx": 0, "kv_rate": 0.0}
     try:
         async with httpx.AsyncClient(timeout=4) as c:
-            d = (await c.post(f"{OLLAMA_URL}/api/show", json={"model": model})).json()
-        info = d.get("model_info", {}) or {}
-        val = int(next((v for k, v in info.items() if k.endswith("context_length")), 0) or 0)
+            info = (await c.post(f"{OLLAMA_URL}/api/show",
+                                 json={"model": model})).json().get("model_info", {}) or {}
+        meta["native_ctx"] = int(next((v for k, v in info.items()
+                                       if k.endswith("context_length")), 0) or 0)
+        prefix = next((k[:-len(".block_count")] for k in info if k.endswith(".block_count")), None)
+        if prefix:
+            g = lambda s: info.get(f"{prefix}.{s}")
+            n_layers = int(g("block_count") or 0)
+            n_heads = int(g("attention.head_count") or 0)
+            n_kv = int(g("attention.head_count_kv") or n_heads or 0)
+            key_len = g("attention.key_length")
+            head_dim = int(key_len) if key_len else (int(g("embedding_length") or 0) // n_heads if n_heads else 0)
+            if n_layers and n_kv and head_dim:
+                meta["kv_rate"] = (2 * n_layers * n_kv * head_dim * KV_DTYPE_BYTES) / 1e9
     except Exception:
-        val = 0
-    if val:
-        _native_ctx_cache[model] = val
-    return val
+        pass
+    if meta["native_ctx"] or meta["kv_rate"]:
+        _ollama_meta_cache[model] = meta
+    if meta["kv_rate"]:
+        gate.set_kv_rate(model, meta["kv_rate"])
+    return meta
 
 
 def _prompt_chars(body: dict) -> int:
@@ -1315,13 +1337,14 @@ def _usage_from_stream(buf: bytes, backend: str):
 
 def _record_proxy_call(path: str, model: str, backend: str, status: int,
                        latency_s: float, in_tok, out_tok, tok_s, prompt: str,
-                       num_ctx=None):
+                       num_ctx=None, est_gb=None):
     ts = time.time()
     norm = path if path.startswith("/") else "/" + path
     entry = {"at": time.strftime("%H:%M:%S"), "ts": ts, "status": str(status),
              "latency": f"{latency_s:.2f}s", "path": norm, "model": model,
              "backend": backend, "via": "proxy", "prompt": prompt,
-             "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s, "num_ctx": num_ctx}
+             "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s,
+             "num_ctx": num_ctx, "est_gb": round(est_gb, 1) if est_gb else None}
     _recent_calls.append(entry)
     _proxy_recent.append((norm, ts))
 
@@ -1346,19 +1369,23 @@ async def llm_proxy(backend: str, path: str, request: Request):
     # Auto-size the context window to the prompt so long inputs aren't silently truncated
     # at the cheap default. Ollama-only (num_ctx is Ollama's knob); OpenAI sidecars manage
     # their own context. If we grow it, re-serialize the body so the runner gets num_ctx.
+    # Then size the admission estimate to weights + KV(chosen_ctx) — so a 32K-context call
+    # reserves its real (much larger) footprint, not a flat markup.
     chosen_ctx = None
+    est_hint = 0.0
     if backend == "ollama" and path in ("api/chat", "api/generate"):
-        native = await _native_ctx(model)
-        chosen_ctx = _autosize_ctx(body, native, _prompt_chars(body))
+        meta = await _ollama_meta(model)
+        chosen_ctx = _autosize_ctx(body, meta["native_ctx"], _prompt_chars(body))
         if chosen_ctx:
             body.setdefault("options", {})["num_ctx"] = chosen_ctx
             raw = json.dumps(body).encode()
+        est_hint = gate.est_gb(model, ctx=chosen_ctx or PROXY_CTX_DEFAULT)
 
     # Admit — wait in the queue until granted (fail-open after PROXY_MAX_WAIT_S).
     start = time.time()
     lease = None
     while True:
-        d = await gate.admit(job_id, model, backend=backend)
+        d = await gate.admit(job_id, model, backend=backend, est_gb=est_hint)
         if d.grant:
             lease = d
             break
@@ -1385,7 +1412,7 @@ async def llm_proxy(backend: str, path: str, request: Request):
                 in_tok, out_tok, tok_s = _usage_from_stream(bytes(buf), backend)
                 _record_proxy_call(path, model, backend, status or 200,
                                    time.time() - t0, in_tok, out_tok, tok_s, prompt,
-                                   num_ctx=chosen_ctx)
+                                   num_ctx=chosen_ctx, est_gb=est_hint)
                 if lease:
                     await gate.release(job_id=job_id)
 
@@ -1400,12 +1427,12 @@ async def llm_proxy(backend: str, path: str, request: Request):
         except Exception:
             in_tok = out_tok = tok_s = None
         _record_proxy_call(path, model, backend, r.status_code, time.time() - t0,
-                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx)
+                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "application/json"))
     except Exception as e:
         _record_proxy_call(path, model, backend, 502, time.time() - t0,
-                           None, None, None, prompt, num_ctx=chosen_ctx)
+                           None, None, None, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
         return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
     finally:
         if lease:

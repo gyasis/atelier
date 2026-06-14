@@ -1047,7 +1047,7 @@ async function refreshAll() {
     dur: (typeof c.latency === 'string' ? c.latency.replace(/(\.\d{2})\d+/, '$1') : '—'),
     meta: { kind:'LLM', backend:c.backend ?? 'ollama', model:c.model, path:c.path, status:c.status,
             latency:c.latency, tok_s:c.tok_s, ttft_ms:c.ttft_ms, eval_tokens:c.eval_tokens ?? c.out_tok,
-            in_tok:c.in_tok ?? c.prompt_tokens, num_ctx:c.num_ctx, prompt:c.prompt, source:'governor' },
+            in_tok:c.in_tok ?? c.prompt_tokens, num_ctx:c.num_ctx, est_gb:c.est_gb, prompt:c.prompt, source:'governor' },
   }));
   const _seen = new Set();
   const allRows = [...modelCallRows, ...govCallRows, ...synthRows]
@@ -1075,6 +1075,7 @@ function _fmtTaskHover(m){
   if (m.in_tok)      h += row('input tokens', m.in_tok);
   if (m.eval_tokens) h += row('output tokens', m.eval_tokens);
   if (m.num_ctx)     h += row('context window', m.num_ctx + ' (auto-sized)');
+  if (m.est_gb)      h += row('memory reserved', m.est_gb + ' GB');
   if (m.chars)       h += row('chars', m.chars);
   if (m.seconds)     h += row('audio seconds', (+m.seconds).toFixed(1));
   const promptText = m.prompt || m.text;
