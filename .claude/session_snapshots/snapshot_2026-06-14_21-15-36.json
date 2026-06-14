@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781464536",
+  "timestamp": "2026-06-14T21:15:36+02:00",
+  "mental_state": "feat(gate): KV-aware est_gb — budget scales with the context window
+
+The gate estimated weights × 1.15 (a flat ~KV-at-16K markup), so when the proxy
+auto-grew num_ctx the reserved memory stayed too low — the live backstop caught
+OOM but the budget ran optimistic. Now est_gb = weights + KV(ctx):",
+  "current_phase": "feat(gate): KV-aware est_gb — budget scales with the context window",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["b1f07d88c3e712330702356b84ecfb5b70e065b1"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}

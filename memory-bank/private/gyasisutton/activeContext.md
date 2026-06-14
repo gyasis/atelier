@@ -1,19 +1,24 @@
 # Active Context
 
-**Last Updated**: 2026-06-14 18:44:52
+**Last Updated**: 2026-06-14 21:15:36
 
 ## Current Focus
-feat(cli): add 'atelier discover' — human-friendly hub discovery
+feat(gate): KV-aware est_gb — budget scales with the context window
 
-Stdlib-only CLI wrapping the governor's /agent manifest:
-  atelier discover         hub overview — LLM front door, control plane, sidecars, docs
-  atelier discover <name>  drill into one sidecar's methods/params + curl examples
-  atelier discover --json  raw manifest (pipeable to jq)
-  atelier discover --plain no colour
+The gate estimated weights × 1.15 (a flat ~KV-at-16K markup), so when the proxy
+auto-grew num_ctx the reserved memory stayed too low — the live backstop caught
+OOM but the budget ran optimistic. Now est_gb = weights + KV(ctx):
+- KV rate (GB/token) computed per model from /api/show architecture
+  (2 × layers × kv_heads × head_dim × dtype), fed to the gate (set_kv_rate).
+- est_gb(model, ctx) scales the KV term with the context; the proxy passes the
+  auto-sized ctx so admission books the real footprint. Falls back to the flat
+  markup when architecture is unknown.
+- Poller warms KV rates for loaded models so direct /admit callers benefit too.
+- est_gb surfaced in telemetry + dashboard hover ('memory reserved: 8.7 GB').
 
-Reads ATELIER_GOVERNOR_URL (default :8799); clean error if the governor is down.
-Installed by symlinking cli/atelier into ~/.local/bin (matches the gentle-eye CLI
-convention). Same data an agent gets from GET /agent?expand=true, formatted for a human.
+Validated against reality: mistral est @16K = 6.55GB ≈ 6.4GB observed loaded;
+a live 32K-context call reserved 8.7GB (flat markup would've been ~4.7GB).
+14/14 admission tests pass.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -21,10 +26,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 ```
  .claude/activity_stream.md          |  12 +
  .../snapshot_latest.json            |   2 +-
- .../history/2026-06-10-37bba2bb.md  | 270 +++++++++++-
- .../gyasisutton/activeContext.md    |  33 +-
+ .../history/2026-06-10-37bba2bb.md  | 673 +++++++++++-
+ .../gyasisutton/activeContext.md    |  40 +-
  .../private/gyasisutton/progress.md |   2 +-
- 5 files changed, 296 insertions(+), 23 deletions(-)
+ 5 files changed, 706 insertions(+), 23 deletions(-)
 ```
 
 ## Modified Files
