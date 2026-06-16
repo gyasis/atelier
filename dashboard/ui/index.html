@@ -1013,13 +1013,18 @@ async function refreshAll() {
   // -- Top processes (polled every 5th refresh ~ 12.5s) --
   if (!refreshAll._procTick) refreshAll._procTick = 0;
   if (refreshAll._procTick++ % 5 === 0) {
-    tauriGet('get_top_processes').then(data => {
+    // Highest-MEMORY processes from the governor (sorted by RSS desc) — fall back to the
+    // Tauri command (CPU-sorted) only if the governor is unreachable.
+    const renderProcs = procs => {
       const tbody = document.getElementById('topProcessRows');
-      if (!tbody || !data?.processes?.length) return;
-      tbody.innerHTML = data.processes.map(p =>
+      if (!tbody || !procs?.length) return;
+      tbody.innerHTML = [...procs].sort((a,b)=>(b.rss_mb||0)-(a.rss_mb||0)).map(p =>
         `<tr><td style="max-width:140px;overflow:hidden;text-overflow:ellipsis">${p.name}</td><td>${p.rss_mb} MB</td><td class="muted">${p.pid}</td></tr>`
       ).join('');
-    });
+    };
+    fetch(`${GOVERNOR_URL}/top-processes?limit=10`, { signal: AbortSignal.timeout(2500) })
+      .then(r => r.json()).then(d => renderProcs(d.processes))
+      .catch(() => tauriGet('get_top_processes').then(d => renderProcs(d?.processes)));
   }
 
   // -- Task stream: model_call log metrics + synths --

@@ -1165,6 +1165,30 @@ def budget():
     return snap
 
 
+@app.get("/top-processes")
+def top_processes(limit: int = 10):
+    """Highest-MEMORY processes on the host (RSS, descending) — the actual memory
+    consumers, not top-CPU. Sorted here so the dashboard doesn't have to."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid,rss,comm"],
+                             capture_output=True, text=True, timeout=4).stdout
+    except Exception as e:
+        return {"processes": [], "error": str(e)}
+    rows = []
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, rss_kb = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        rows.append({"pid": pid, "rss_mb": round(rss_kb / 1024),
+                     "name": parts[2].rsplit("/", 1)[-1]})
+    rows.sort(key=lambda r: r["rss_mb"], reverse=True)
+    return {"processes": rows[:max(1, min(limit, 50))]}
+
+
 @app.post("/admit")
 async def admit(req: AdmitReq):
     if not req.job_id or not req.model:
