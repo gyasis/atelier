@@ -1,17 +1,23 @@
 # Active Context
 
-**Last Updated**: 2026-06-16 08:46:20
+**Last Updated**: 2026-06-16 09:04:42
 
 ## Current Focus
-fix(hud): donut live-updates + shows real memory (same fix as index.html)
+feat(governor): real per-sidecar memory (RSS) in tenants, not hardcoded guesses
 
-The HUD's memory donut was gated on '&& loaded.length', so whenever nothing was
-loaded it SKIPPED the redraw and froze on its last frame — which is why it looked
-like the only component that wouldn't live-update (it had a refresh timer all
-along; the update was just conditionally skipped). Now it always redraws from the
-latest pressure: tenants + a labelled 'system / other' wedge for real-but-untracked
-memory + the actual free_gb (not 64−tenants), with the center showing real resident
-GB as the pressure signal.
+Sidecars carried no mem_gb, so the dashboard donut filled it from a hardcoded
+SIDECAR_MEM table (kokoro=4, whisper=2, dia=8 …) — and only when warm. Those were
+fiction: kokoro (82M params) actually uses 0.1GB, not 4GB.
+
+The poller now measures each WARM sidecar's real resident memory: find its listening
+process (by --port / <name>-sidecar path) and sum its process subtree RSS — so a
+proxy sidecar's llama-server / mlx child (which holds the model) is included. Feeds
+mem_gb into the tenant data; the dashboard already prefers t.mem_gb over the estimate,
+so the donut + Top Memory now show real sidecar footprints with no UI change.
+
+Verified: kokoro listening PID RSS = 0.10GB, matches the reported value exactly.
+Caveat: RSS may undercount GPU/Metal-buffer memory for MPS-based sidecars; the
+llama.cpp/mlx child-process RSS (the big consumers) is accurate.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -19,10 +25,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 ```
  .claude/activity_stream.md          |  12 +
  .../snapshot_latest.json            |   2 +-
- .../history/2026-06-10-37bba2bb.md  | 595 +++++++++++-
- .../gyasisutton/activeContext.md    |  28 +-
+ .../history/2026-06-10-37bba2bb.md  | 236 +++++++++++-
+ .../gyasisutton/activeContext.md    |  35 +-
  .../private/gyasisutton/progress.md |   2 +-
- 5 files changed, 620 insertions(+), 19 deletions(-)
+ 5 files changed, 267 insertions(+), 20 deletions(-)
 ```
 
 ## Modified Files

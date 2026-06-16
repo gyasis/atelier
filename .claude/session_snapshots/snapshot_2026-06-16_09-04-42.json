@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781593482",
+  "timestamp": "2026-06-16T09:04:42+02:00",
+  "mental_state": "feat(governor): real per-sidecar memory (RSS) in tenants, not hardcoded guesses
+
+Sidecars carried no mem_gb, so the dashboard donut filled it from a hardcoded
+SIDECAR_MEM table (kokoro=4, whisper=2, dia=8 …) — and only when warm. Those were
+fiction: kokoro (82M params) actually uses 0.1GB, not 4GB.",
+  "current_phase": "feat(governor): real per-sidecar memory (RSS) in tenants, not hardcoded guesses",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["82e24b24fa992ec17f60f33487d50b58eb2a3b7d"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}
