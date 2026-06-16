@@ -1,0 +1,31 @@
+{
+  "session_id": "session-1781592195",
+  "timestamp": "2026-06-16T08:43:15+02:00",
+  "mental_state": "fix(dashboard): Top Memory table sorts by memory, not CPU
+
+The 'Top Memory' table was fed by a Tauri command running 'ps … -r' (sort by
+CPU) then take 10 — so it showed RSS of the top-CPU processes, not the actual
+memory hogs. Add a governor GET /top-processes (ps -axo pid,rss,comm, sorted by",
+  "current_phase": "fix(dashboard): Top Memory table sorts by memory, not CPU",
+  "progress": 87,
+  "tasks_completed": 21,
+  "tasks_total": 24,
+  "next_steps": [
+    "Review progress.md",
+    "Update projectbrief.md if needed",
+    "Continue next task from tasks.md"
+  ],
+  "blockers": [],
+  "git_commits": ["bcba84ebb7a57348275ba683cc5b88aae21b22d4"],
+  "files_modified": [
+  ".claude/activity_stream.md",
+  ".specstory/history/2026-06-10-37bba2bb.md",
+  "memory-bank/private/gyasisutton/activeContext.md",
+  "memory-bank/private/gyasisutton/progress.md"
+],
+  "system_state": {
+    "memory_bank": "synchronized",
+    "context_protection": "active",
+    "skills": "operational"
+  }
+}
