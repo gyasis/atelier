@@ -1,27 +1,28 @@
 # Active Context
 
-**Last Updated**: 2026-06-16 08:43:15
+**Last Updated**: 2026-06-16 08:46:20
 
 ## Current Focus
-fix(dashboard): Top Memory table sorts by memory, not CPU
+fix(hud): donut live-updates + shows real memory (same fix as index.html)
 
-The 'Top Memory' table was fed by a Tauri command running 'ps … -r' (sort by
-CPU) then take 10 — so it showed RSS of the top-CPU processes, not the actual
-memory hogs. Add a governor GET /top-processes (ps -axo pid,rss,comm, sorted by
-RSS desc) and fetch it directly from the dashboard (CSP null, no Rust rebuild);
-falls back to the old Tauri command if the governor is down. The panel now shows
-the real highest-memory consumers — what matters for memory pressure.
+The HUD's memory donut was gated on '&& loaded.length', so whenever nothing was
+loaded it SKIPPED the redraw and froze on its last frame — which is why it looked
+like the only component that wouldn't live-update (it had a refresh timer all
+along; the update was just conditionally skipped). Now it always redraws from the
+latest pressure: tenants + a labelled 'system / other' wedge for real-but-untracked
+memory + the actual free_gb (not 64−tenants), with the center showing real resident
+GB as the pressure signal.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## Recent Changes
 ```
- .claude/activity_stream.md          | 12 +++
- .../snapshot_latest.json            |  2 +-
- .../history/2026-06-10-37bba2bb.md  | 64 ++++++++++++-
- .../gyasisutton/activeContext.md    | 25 +++--
- .../private/gyasisutton/progress.md |  2 +-
- 5 files changed, 89 insertions(+), 16 deletions(-)
+ .claude/activity_stream.md          |  12 +
+ .../snapshot_latest.json            |   2 +-
+ .../history/2026-06-10-37bba2bb.md  | 595 +++++++++++-
+ .../gyasisutton/activeContext.md    |  28 +-
+ .../private/gyasisutton/progress.md |   2 +-
+ 5 files changed, 620 insertions(+), 19 deletions(-)
 ```
 
 ## Modified Files
