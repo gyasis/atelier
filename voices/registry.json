@@ -61,6 +61,39 @@
       "post_fx": "none",
       "source": "YouTube LH0YYK5xgPw (English intro line ~0:03-0:06)",
       "added": "2026-06-09"
+    },
+    "gyasi": {
+      "engine": "omnivoice",
+      "language": "en",
+      "ref_audio": "~/models/voice-refs/gyasi_ref.wav",
+      "ref_text": "Okay, like I said, I would like to do research instead of working in an organization that does not want to pay me. So maybe I can get this done.",
+      "params": {
+        "num_step": 48,
+        "guidance_scale": 2.0,
+        "class_temperature": 0.3
+      },
+      "post_fx": "none",
+      "source": "Gyasi's own voice, mic capture (Insta360) 2026-06-16. User-driven recording (live countdown) for clean timing.",
+      "added": "2026-06-16"
+    },
+    "gyasi_dia": {
+      "engine": "dia",
+      "language": "en",
+      "speaker": "S3",
+      "ref_audio": "~/models/voice-refs/gyasi_ref_dia.wav",
+      "ref_text": "Okay, like I said, I would like to do research instead of working in an organization that does not want to pay me.",
+      "endpoint": "http://192.168.0.159:8769/tts",
+      "params": {
+        "temperature": 1.4,
+        "guidance_scale": 4.0,
+        "top_p": 0.90,
+        "top_k": 45,
+        "max_new_tokens": 3072
+      },
+      "usage": "POST text prefixed with [S3]. Per-request speaker selection (added 2026-06-16) means [S3] uses ONLY this ref. Split long monologues into <=10s chunks + concat — Dia destabilizes past ~10s. temperature up to 2.5 for more emotion; add (sighs)/(shouts) cues inline.",
+      "post_fx": "none (loudnorm I=-16 TP=-1.5 on output only)",
+      "source": "Gyasi's own voice; registered as Dia [S3] canonical slot via DIA_GYASI_REF_* env in io.macstudio.hub.dia.plist.",
+      "added": "2026-06-16"
     }
   }
 }
