@@ -148,6 +148,56 @@ def read_vm() -> dict:
         "swapouts": pages("Swapouts"),
     }
 
+# ---------- real per-sidecar memory (RSS of the process + its model-holding children) ----------
+def _proc_table() -> list[tuple]:
+    """(pid, ppid, rss_kb, command) for every process — one ps call."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,rss=,command="],
+                             capture_output=True, text=True, timeout=4).stdout
+    except Exception:
+        return []
+    procs = []
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            procs.append((int(parts[0]), int(parts[1]), int(parts[2]), parts[3]))
+        except ValueError:
+            continue
+    return procs
+
+
+def _subtree_rss_gb(root_pid: int, procs: list[tuple]) -> float:
+    """Sum RSS of a process and ALL its descendants (so a proxy sidecar's llama-server /
+    mlx child — which actually holds the model — is counted)."""
+    kids: dict[int, list[int]] = {}
+    rss: dict[int, int] = {}
+    for pid, ppid, r, _ in procs:
+        kids.setdefault(ppid, []).append(pid)
+        rss[pid] = r
+    total, stack, seen = 0, [root_pid], set()
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        total += rss.get(x, 0)
+        stack.extend(kids.get(x, []))
+    return round(total / 1048576, 1)   # KB → GB
+
+
+def _sidecar_rss_gb(name: str, procs: list[tuple]) -> float | None:
+    """Real resident GB for a sidecar: find its listening process (by --port from
+    SIDECAR_BASE, or the <name>-sidecar path) and sum its process subtree."""
+    base = SIDECAR_BASE.get(name, "")
+    port = base.rsplit(":", 1)[-1] if ":" in base else ""
+    for pid, _ppid, _r, cmd in procs:
+        if (port and f"--port {port}" in cmd) or f"{name}-sidecar" in cmd:
+            return _subtree_rss_gb(pid, procs)
+    return None
+
+
 # ---------- async pollers ----------
 async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
@@ -262,6 +312,15 @@ async def _poller():
                 tenants = await poll_ollama(client)
                 for name, url in SIDECARS.items():
                     tenants.append(await poll_sidecar(client, name, url))
+                # annotate warm sidecars with their REAL measured RSS (donut/top show truth,
+                # not the dashboard's hardcoded SIDECAR_MEM guesses)
+                procs = _proc_table()
+                for t in tenants:
+                    if (t.get("tenant") == "atelier" and not t.get("mem_gb")
+                            and t.get("state") not in (None, "cold", "unreachable")):
+                        rss = _sidecar_rss_gb(t["name"], procs)
+                        if rss:
+                            t["mem_gb"] = rss
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
                 level, alerts = compute_level(vm, spill_recent)
                 _state.update({
