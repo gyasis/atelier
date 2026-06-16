@@ -443,17 +443,26 @@ function applyHudData(pressure, telemetry, sidecars, logMetrics) {
     enriched.push({ name: 'ollama', state: 'cold', mem_gb: 0 });
   }
 
-  // -- Pie chart --
+  // -- Pie chart: honest memory, ALWAYS redraws (the old `&& loaded.length` gate froze it
+  // whenever nothing was loaded). Tenants + a labelled 'system / other' wedge for real-but-
+  // untracked memory + the actual free figure — not 64−tenants.
+  const PALETTE = ['#C8A96E','#6E86C8','#A98B5C','#5FA86B','#C99A52','#9B6EC8','#D9C091','#63A0A8'];
+  const FREE_COLOR = '#26251F', OTHER_COLOR = '#454751';
   const loaded = enriched.filter(t => t.mem_gb > 0);
-  if (pieInst && loaded.length) {
-    const gb = loaded.map(t => t.mem_gb);
-    const free = Math.max(0, 64 - gb.reduce((a,b)=>a+b,0));
-    pieInst.data.datasets[0].data = [...gb, free];
-    pieInst.data.labels = [...loaded.map(t=>t.name), 'free'];
+  if (pieInst && pressure) {
+    const residentGb = pressure.resident_gb ?? 0;
+    const freeGb = Math.max(0, pressure.free_gb ?? 0);
+    const tenantSum = loaded.reduce((a,t)=>a+(t.mem_gb||0),0);
+    const other = Math.max(0, residentGb - tenantSum);
+    const segs = loaded.map((t,i)=>({name:t.name, gb:t.mem_gb, c:PALETTE[i%PALETTE.length]}));
+    if (other > 0.3) segs.push({name:'system / other', gb:other, c:OTHER_COLOR});
+    segs.push({name:'free', gb:freeGb, c:FREE_COLOR});
+    pieInst.data.datasets[0].data = segs.map(s=>+(s.gb||0).toFixed(1));
+    pieInst.data.labels = segs.map(s=>s.name);
+    pieInst.data.datasets[0].backgroundColor = segs.map(s=>s.c);
     pieInst.update('none');
-    // update center text
     const cen = document.querySelector('.pie-center .pn');
-    if (cen) cen.textContent = gb.reduce((a,b)=>a+b,0).toFixed(0);
+    if (cen) cen.textContent = residentGb.toFixed(0);   // real total used = the pressure signal
   }
 
   // -- Sidecar rows (busiest 3) --
