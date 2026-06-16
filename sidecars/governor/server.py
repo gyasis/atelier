@@ -70,6 +70,9 @@ SIDECAR_BASE = {
     "llamacpp": "http://127.0.0.1:8771",
     "fastmlx": "http://127.0.0.1:8772",
     "mlxlm": "http://127.0.0.1:8773",
+    "radiogen": "http://127.0.0.1:8774",
+    "maisi": "http://127.0.0.1:8775",
+    "medner": "http://127.0.0.1:8131",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -77,6 +80,8 @@ SIDECAR_LOGS = {
     "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
     "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
     "whisper": Path.home() / "Library/Logs/whisper-sidecar.out.log",
+    "radiogen": Path.home() / "Library/Logs/radiogen-sidecar.out.log",
+    "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -87,6 +92,8 @@ SIDECAR_LABELS = {
     "llamacpp": "io.macstudio.hub.llamacpp",
     "fastmlx": "io.macstudio.hub.fastmlx",
     "mlxlm": "io.macstudio.hub.mlxlm",
+    "radiogen": "io.macstudio.hub.radiogen",
+    "maisi": "io.macstudio.hub.maisi",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
@@ -752,8 +759,9 @@ SIDECAR_ROLES = {
     "llamacpp": "LLM — llama.cpp/llama-server (Metal, GGUF), OpenAI-compatible",
     "fastmlx": "LLM/VLM — FastMLX (MLX-native), OpenAI-compatible [blocked: upstream]",
     "mlxlm": "LLM — Apple mlx_lm.server (MLX-native), OpenAI-compatible",
+    "medner": "NER — medical entity extraction (GLiNER + d4data + scispaCy, MPS)",
 }
-AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm"}
+AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner"}
 
 async def _fetch_agent_manifest(client: httpx.AsyncClient, url: str) -> dict:
     """Pull one sidecar's /agent. GET /agent never wakes a model, so expanding is

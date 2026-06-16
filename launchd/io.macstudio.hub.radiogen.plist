@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.macstudio.hub.radiogen</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyasisutton/services/radiogen-sidecar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/gyasisutton/services/cxr-gen/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>server:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8774</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/gyasisutton/Library/Logs/radiogen-sidecar.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyasisutton/Library/Logs/radiogen-sidecar.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyasisutton/services/cxr-gen/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>RADIOGEN_MODEL</key>
+        <string>stanfordmimi/RoentGen-v2</string>
+        <key>RADIOGEN_PORT</key>
+        <string>8774</string>
+        <key>IDLE_UNLOAD_SECONDS</key>
+        <string>180</string>
+        <key>KEEP_WARM</key>
+        <string>false</string>
+        <key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+        <string>1</string>
+        <key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key>
+        <string>0.0</string>
+        <key>HF_HUB_DISABLE_TELEMETRY</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
