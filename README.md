@@ -11,7 +11,14 @@ LAN-only AI model server running on a Mac Studio (Apple M1 Max, 64 GB). Hosts pr
 | `omnivoice` | 8770 | k2-fsa/OmniVoice (Diffusion LM, PyTorch MPS) | **PRIMARY TTS** — natural multi-speaker via instruct (accent/pitch/gender), ~0.6–1× RTF |
 | `kokoro` | 8765 | kokoro-onnx (CoreML/MPS) | Fallback TTS — fast, fixed-voice library, ~0.6s/line (twin on Linux `:18765`) |
 | `dia` | 8769 | nari-labs/Dia-1.6B-0626 (PyTorch MPS) | Expressive cloning TTS — **retired for live** (~10× RTF), overnight batch only |
+| `whisper` | 8766 | Whisper (large-v3-turbo, MPS) | ASR — speech-to-text (+ optional LLM structure/summarize) |
 | `comfyui` | 8188 | ComfyUI (PyTorch MPS) | Image + video generation. Wan2.1 1.3B + 14B Q4 verified |
+| `radiogen` | 8774 | diffusers Stable Diffusion · RoentGen-v2 (PyTorch MPS) | Synthetic chest X-ray → DICOM (Modality DX) bound to a FHIR ImagingStudy |
+| `maisi` | 8775 | MONAI MAISI on Modal A100 (cloud passthrough, $0 idle) | Synthetic 3D CT — thin local proxy to the `atelier-maisi` Modal app |
+| `llamacpp` | 8771 | llama.cpp (GGUF, Metal) | LLM — OpenAI-compatible |
+| `mlxlm` | 8773 | Apple mlx_lm (MLX) | LLM — OpenAI-compatible |
+| `fastmlx` | 8772 | FastMLX (MLX-native) | LLM/VLM — OpenAI-compatible (blocked: upstream) |
+| `medner` | 8131 | GLiNER-biomed + d4data + scispaCy (PyTorch MPS) | Medical NER — disease/sign/symptom/drug/gene tags from clinical text (on-demand) |
 | Ollama | 11434 | Apple's prebuilt | LLM serving (gemma, qwen3:32b, etc.) — managed outside Atelier but co-resident |
 
 **Start here:** [`docs/ATELIER.md`](docs/ATELIER.md) — the full overview (what it is, how it

@@ -82,6 +82,7 @@ SIDECAR_LOGS = {
     "whisper": Path.home() / "Library/Logs/whisper-sidecar.out.log",
     "radiogen": Path.home() / "Library/Logs/radiogen-sidecar.out.log",
     "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
+    "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -94,6 +95,7 @@ SIDECAR_LABELS = {
     "mlxlm": "io.macstudio.hub.mlxlm",
     "radiogen": "io.macstudio.hub.radiogen",
     "maisi": "io.macstudio.hub.maisi",
+    "medner": "io.macstudio.hub.medner",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------

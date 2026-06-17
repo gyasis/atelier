@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.macstudio.hub.medner</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/gyasisutton/Documents/code/atelier/sidecars/medner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/gyasisutton/Documents/code/atelier/sidecars/medner/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>app:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8131</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/gyasisutton/Library/Logs/medner-sidecar.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/gyasisutton/Library/Logs/medner-sidecar.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/gyasisutton/Documents/code/atelier/sidecars/medner/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/gyasisutton</string>
+        <key>MEDNER_PORT</key>
+        <string>8131</string>
+        <key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+        <string>1</string>
+        <key>PYTORCH_MPS_HIGH_WATERMARK_RATIO</key>
+        <string>0.0</string>
+        <key>HF_HUB_DISABLE_TELEMETRY</key>
+        <string>1</string>
+        <key>TOKENIZERS_PARALLELISM</key>
+        <string>false</string>
+    </dict>
+</dict>
+</plist>

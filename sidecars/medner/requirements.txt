@@ -1,0 +1,12 @@
+# medner sidecar — pinned for Apple-Silicon / MPS.
+# transformers <5: the 5.x line broke the token-classification pipeline (the bug that
+# killed the Linux run). 4.46 works with both GLiNER and the d4data NER pipeline.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+requests>=2.31
+torch>=2.2
+transformers>=4.44,<5
+gliner>=0.2.13
+spacy>=3.7,<3.8
+scispacy==0.5.5

@@ -14,6 +14,9 @@ copy-paste quick-reference distilled from those manifests. Ports are loopback; s
 | llamacpp | 8771 | LLM — llama.cpp (GGUF, Metal), OpenAI-compatible | ✓ live |
 | mlxlm | 8773 | LLM — Apple mlx_lm (MLX), OpenAI-compatible | ✓ live |
 | fastmlx | 8772 | LLM/VLM — MLX-native | ✗ blocked (upstream) |
+| medner | 8131 | NER — medical entity extraction (GLiNER + d4data + scispaCy) | ✓ live (on-demand) |
+| radiogen | 8774 | Imaging — synthetic chest X-ray (diffusers SD) → DICOM | ✓ live |
+| maisi | 8775 | Imaging — synthetic 3D CT (MONAI MAISI on Modal A100) | ✓ live (cloud) |
 
 Every sidecar also has: `GET /readyz` (warm/cold/busy + queue depth), `GET /agent`
 (self-describing manifest), `POST /admin/unload` (free its memory now).
@@ -103,6 +106,44 @@ curl -s http://127.0.0.1:8773/v1/chat/completions -H 'content-type: application/
   -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"hi"}]}'
 ```
 Also: `POST /v1/completions`, `GET /v1/models`, `POST /admin/unload`.
+
+---
+
+## Imaging generation
+
+### radiogen (8774) — synthetic chest X-ray → DICOM
+```bash
+curl -s $URL/generate -H 'content-type: application/json' \
+  -d '{"prompt":"frontal chest X-ray, right lower lobe pneumonia"}' | jq '.uids'
+```
+diffusers Stable Diffusion (RoentGen-v2, gated — set `RADIOGEN_MODEL` + an HF token). Returns PNG +
+DICOM (base64, Modality DX) bound to a FHIR ImagingStudy's UIDs.
+
+### maisi (8775) — synthetic 3D CT (cloud passthrough)
+```bash
+curl -s $URL/generate -H 'content-type: application/json' \
+  -d '{"prompt":"abdomen CT, normal anatomy","body_region":"abdomen"}' | jq
+```
+Thin local proxy → Modal A100 app `atelier-maisi` ($0 idle, scales to zero). `/readyz` reports
+`backend=modal`, `device="A100 (modal cloud)"`, `passthrough=true`.
+
+---
+
+## NER
+
+### medner (8131) — medical entity extraction (GLiNER + d4data + scispaCy)
+```bash
+# all three providers, default label set:
+curl -s $URL/ner -H 'content-type: application/json' \
+  -d '{"text":"A man on haloperidol develops oculogyric crisis and tongue protrusion."}' | jq
+
+# pick a provider + your own GLiNER labels:
+curl -s $URL/ner -H 'content-type: application/json' \
+  -d '{"text":"...","providers":["gliner"],"labels":["disease or disorder","medication or drug","sign"]}' | jq
+```
+Returns `{device, results:{provider:[{tag,type,score?}]}}`. Providers: `gliner` (zero-shot typed),
+`d4data` (granular), `scispacy` (disease/chemical), `hf` (scaffold). On-demand — start with
+`sidecars/medner/run.sh`. For LLM-based NER use Ollama (`gemma4:12b`, `medgemma-27b-it`).
 
 ---
 
