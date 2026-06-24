@@ -638,6 +638,19 @@ function miniLine(id, data, warn, max){
 miniLine('ttftChart', [], 800, 1200);
 miniLine('tpsChart', [], 30, 75);
 
+// Adaptive y-axis: scale to the live data so a single slow request (e.g. a 120s
+// spike) doesn't flatten everything into the floor — while keeping the warn line
+// in view and a sane minimum range when values are tiny. Reads warn from dataset[1].
+function fitY(chart){
+  const warn = Number(chart.data.datasets[1]?.data?.[0]) || 0;
+  const vals = chart.data.datasets[0].data.filter(v => v != null && isFinite(v));
+  const peak = Math.max(warn, ...(vals.length ? vals : [0]));
+  const padded = peak * 1.2;                                   // ~20% headroom
+  const mag = Math.pow(10, Math.floor(Math.log10(padded || 1)));
+  const nice = Math.ceil(padded / mag) * mag;                  // round up to clean ticks
+  chart.options.scales.y.max = Math.max(nice, warn * 1.25, 1); // keep warn visible
+}
+
 // ---------- Gantt swimlane — starts empty, built from real log metrics ----------
 document.getElementById('lanes').innerHTML =
   '<div style="color:var(--text-3);font-size:9px;letter-spacing:.12em;text-transform:uppercase;padding:4px 0">waiting for activity data…</div>';
@@ -957,6 +970,7 @@ async function refreshAll() {
     ttftChart.data.datasets[0].data = callLatencies;
     ttftChart.data.labels = callLatencies.map((_,i)=>i+1);
     ttftChart.data.datasets[1].data = new Array(callLatencies.length).fill(800);
+    fitY(ttftChart);
     ttftChart.update('none');
   }
 
@@ -974,6 +988,7 @@ async function refreshAll() {
     tpsChart.data.datasets[0].data = [...tpsChart._atelierRing];
     tpsChart.data.labels = tpsChart._atelierRing.map((_,i)=>i+1);
     tpsChart.data.datasets[1].data = new Array(tpsChart._atelierRing.length).fill(30);
+    fitY(tpsChart);
     tpsChart.update('none');
   }
   if (perf?.ttft_ms && ttftChart2) {
@@ -983,6 +998,7 @@ async function refreshAll() {
     ttftChart2.data.datasets[0].data = [...ttftChart2._atelierRing];
     ttftChart2.data.labels = ttftChart2._atelierRing.map((_,i)=>i+1);
     ttftChart2.data.datasets[1].data = new Array(ttftChart2._atelierRing.length).fill(800);
+    fitY(ttftChart2);
     ttftChart2.update('none');
   }
 
