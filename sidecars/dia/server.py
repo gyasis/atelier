@@ -64,6 +64,9 @@ SARAH_REF_TEXT = os.environ.get(
     "DIA_SARAH_REF_TEXT",
     "Hi, my name is Sarah, and Im here to keep Leo honest about the projects. Lets get into it.",
 )
+# GYASI [S3] — optional third canonical voice. Only loaded if DIA_GYASI_REF_AUDIO is set.
+GYASI_REF_AUDIO = os.environ.get("DIA_GYASI_REF_AUDIO", "")
+GYASI_REF_TEXT = os.environ.get("DIA_GYASI_REF_TEXT", "")
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -77,8 +80,10 @@ _warmed = False
 _sem = asyncio.Semaphore(1)
 _leo_audio = None
 _sarah_audio = None
-_clone_prefix_text = ""  # "[S1] <leo ref> [S2] <sarah ref> " — prepended to every gen
-_clone_audio = None       # numpy array of concatenated leo+sarah refs
+_gyasi_audio = None       # optional [S3] ref (None unless DIA_GYASI_REF_AUDIO is set)
+_clone_prefix_text = ""  # "[S1] <leo ref> [S2] <sarah ref> [S3] <gyasi ref> " — prepended to every gen
+_clone_audio = None       # numpy array of concatenated leo+sarah(+gyasi) refs
+_speaker_refs = {}        # {"S1": (ref_text, ref_audio), ...} — for per-request prompt selection
 _last_request_at = time.monotonic()
 _unload_task: asyncio.Task | None = None
 _idle_unloaded_at: float | None = None  # timestamp of most recent unload (for /readyz reporting)
@@ -188,22 +193,37 @@ async def _idle_watcher() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _leo_audio, _sarah_audio, _clone_prefix_text, _clone_audio, _unload_task
+    global _leo_audio, _sarah_audio, _gyasi_audio, _clone_prefix_text, _clone_audio, _unload_task, _speaker_refs
 
     # Load reference audio for voice cloning (kept resident — only ~100KB).
     try:
         _leo_audio = _load_audio_mono(LEO_REF_AUDIO)
         _sarah_audio = _load_audio_mono(SARAH_REF_AUDIO)
-        _clone_audio = np.concatenate([_leo_audio, _sarah_audio]).astype(np.float32)
+        refs = [_leo_audio, _sarah_audio]
         _clone_prefix_text = f"[S1] {LEO_REF_TEXT.strip()} [S2] {SARAH_REF_TEXT.strip()} "
+        # Per-speaker registry — lets /tts build a prompt from ONLY the speakers used,
+        # instead of always prepending all of them (which strangles output length).
+        _speaker_refs = {
+            "S1": (LEO_REF_TEXT.strip(), _leo_audio),
+            "S2": (SARAH_REF_TEXT.strip(), _sarah_audio),
+        }
+        # Optional [S3] GYASI voice — only if configured.
+        if GYASI_REF_AUDIO:
+            _gyasi_audio = _load_audio_mono(GYASI_REF_AUDIO)
+            refs.append(_gyasi_audio)
+            _clone_prefix_text += f"[S3] {GYASI_REF_TEXT.strip()} "
+            _speaker_refs["S3"] = (GYASI_REF_TEXT.strip(), _gyasi_audio)
+        _clone_audio = np.concatenate(refs).astype(np.float32)
+        _gyasi_s = f", GYASI {len(_gyasi_audio)/44100:.2f}s" if _gyasi_audio is not None else ""
+        _speakers = "S1/S2/S3" if _gyasi_audio is not None else "S1/S2"
         print(
             f"[dia] voice clone refs loaded: "
-            f"LEO {len(_leo_audio)/44100:.2f}s, SARAH {len(_sarah_audio)/44100:.2f}s, "
-            f"total prompt {len(_clone_audio)/44100:.2f}s"
+            f"LEO {len(_leo_audio)/44100:.2f}s, SARAH {len(_sarah_audio)/44100:.2f}s{_gyasi_s}, "
+            f"total prompt {len(_clone_audio)/44100:.2f}s, speakers={_speakers}"
         )
     except Exception as e:
         print(f"[dia] WARNING: could not load voice clone refs ({e}). Falling back to no cloning.")
-        _leo_audio = _sarah_audio = _clone_audio = None
+        _leo_audio = _sarah_audio = _gyasi_audio = _clone_audio = None
         _clone_prefix_text = ""
 
     # Cold-load the model at startup (we'd be cold otherwise).
@@ -312,6 +332,8 @@ def agent(request: Request):
             {"name": "tts", "http": "POST /tts", "encoding": "application/json",
              "params": {"text": "dialogue with [S1]/[S2] speaker tags",
                         "use_voice_clone": "bool (default true)",
+                        "speed": "0.5–1.5 — pitch-preserved pace; <1.0 = slower/enunciated",
+                        "emotion": "neutral|calm|measured|warm|expressive — nudges expressiveness",
                         "max_new_tokens": "128–4096", "guidance_scale": "1–10",
                         "temperature": "0.5–2.5", "top_p": "0.1–1.0", "top_k": "1–200"},
              "returns": "audio/wav (44.1kHz); headers x-engine, x-voice-clone",
@@ -322,6 +344,8 @@ def agent(request: Request):
         "recipes": [
             {"goal": "Two-host podcast banter", "do": "POST /tts {text:'[S1] … [S2] …'}"},
             {"goal": "Single narrator (LEO)", "do": "POST /tts {text:'your line'} (defaults to [S1])"},
+            {"goal": "Slow, enunciated reading", "do": "POST /tts {text:'…', speed:0.85, emotion:'measured'}"},
+            {"goal": "Warm/expressive delivery", "do": "POST /tts {text:'…', emotion:'warm'} (or 'expressive')"},
         ],
         "instructions": (
             "1) Write the script with [S1] (LEO) / [S2] (SARAH) speaker tags.\n"
@@ -332,6 +356,41 @@ def agent(request: Request):
     }
 
 
+# emotion preset → (temperature, guidance_scale) overrides (Dia's expressiveness
+# levers). None = keep the request's value. Added for chiron passage slow-reads.
+_EMOTION_PRESETS = {
+    "neutral":    (None, None),
+    "calm":       (1.2, 3.0),
+    "measured":   (1.0, 3.0),   # most deliberate — pairs well with speed<1 for enunciation
+    "warm":       (1.5, 3.5),
+    "expressive": (2.0, 4.5),
+}
+
+
+def _apply_speed(audio_np, sr, speed):
+    """Pitch-preserved time-stretch via ffmpeg atempo (speed<1.0 = slower)."""
+    import subprocess, tempfile, os
+    ff = "/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg"
+    in_path = out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fin:
+            in_path = fin.name
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as fout:
+            out_path = fout.name
+        sf.write(in_path, audio_np, sr, subtype="PCM_16")
+        subprocess.run([ff, "-y", "-loglevel", "error", "-i", in_path,
+                        "-filter:a", f"atempo={speed:.3f}", out_path], check=True)
+        out, _ = sf.read(out_path, dtype="float32")
+        return np.asarray(out).squeeze()
+    finally:
+        for p in (in_path, out_path):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 class TtsReq(BaseModel):
     text: str = Field(..., min_length=1, max_length=8000)
     max_new_tokens: int = Field(3072, ge=128, le=4096)
@@ -340,6 +399,9 @@ class TtsReq(BaseModel):
     top_p: float = Field(0.90, ge=0.1, le=1.0)
     top_k: int = Field(45, ge=1, le=200)
     use_voice_clone: bool = True
+    # --- pacing + emotion knobs (chiron passage slow-reads) ---
+    speed: float = Field(1.0, ge=0.5, le=1.5)   # <1.0 = slower/enunciated (pitch-preserved)
+    emotion: str = Field("neutral")             # neutral|calm|measured|warm|expressive
 
 
 @app.post("/tts")
@@ -349,6 +411,11 @@ async def tts(req: TtsReq, request: Request):
 
     user_text = _normalize_script(req.text)
     use_clone = req.use_voice_clone and _clone_audio is not None
+
+    # Emotion preset nudges Dia's expressiveness levers (temperature + guidance).
+    _emo_t, _emo_g = _EMOTION_PRESETS.get(req.emotion, (None, None))
+    eff_temperature = _emo_t if _emo_t is not None else req.temperature
+    eff_guidance = _emo_g if _emo_g is not None else req.guidance_scale
 
     # Cold-load if needed (model was unloaded due to idle). Pays ~10s
     # cold-load latency, then warm for IDLE_UNLOAD_SECONDS again.
@@ -360,8 +427,14 @@ async def tts(req: TtsReq, request: Request):
             raise HTTPException(503, "cold-load failed; see server logs")
 
     if use_clone:
-        full_text = _clone_prefix_text + user_text
-        prompt_audio = _clone_audio
+        # Build the clone prompt from ONLY the speakers actually referenced in the
+        # text (e.g. "[S3] ..." → just GYASI). Prepending every speaker bloats the
+        # audio prompt and strangles output length. No tag → all speakers (back-compat).
+        used = [s for s in ("S1", "S2", "S3") if f"[{s}]" in user_text and s in _speaker_refs]
+        if not used:
+            used = list(_speaker_refs.keys())
+        full_text = "".join(f"[{s}] {_speaker_refs[s][0]} " for s in used) + user_text
+        prompt_audio = np.concatenate([_speaker_refs[s][1] for s in used]).astype(np.float32)
     else:
         full_text = user_text
         prompt_audio = None
@@ -387,8 +460,8 @@ async def tts(req: TtsReq, request: Request):
                     lambda: _model.generate(
                         **inputs,
                         max_new_tokens=req.max_new_tokens,
-                        guidance_scale=req.guidance_scale,
-                        temperature=req.temperature,
+                        guidance_scale=eff_guidance,
+                        temperature=eff_temperature,
                         top_p=req.top_p,
                         top_k=req.top_k,
                     )
@@ -408,12 +481,18 @@ async def tts(req: TtsReq, request: Request):
 
     # When cloning, the output prepends the reference audio. Crop it.
     # Each audio second is ~44_100 samples at Dia's native rate.
-    if use_clone and _clone_audio is not None:
-        prefix_samples = len(_clone_audio)
+    if use_clone and prompt_audio is not None:
+        prefix_samples = len(prompt_audio)
         if len(audio_np) > prefix_samples:
             audio_np = audio_np[prefix_samples:]
 
     sample_rate = 44_100
+    # Optional pitch-preserved pacing (slow/enunciated reads). Never fatal.
+    if abs(req.speed - 1.0) > 1e-3:
+        try:
+            audio_np = _apply_speed(audio_np, sample_rate, req.speed)
+        except Exception as e:
+            print(f"[tts] speed stretch failed ({e}); returning native-rate audio")
     buf = io.BytesIO()
     sf.write(buf, audio_np, sample_rate, format="WAV", subtype="PCM_16")
     buf.seek(0)

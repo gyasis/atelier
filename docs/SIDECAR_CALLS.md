@@ -56,9 +56,15 @@ Params: `text`, `language`, `instruct`, `ref_audio`+`ref_text` (clone), `speed`,
 ```bash
 curl -s http://127.0.0.1:8769/tts -H 'content-type: application/json' \
   -d '{"text":"[S1] Welcome back. [S2] Glad to be here.","use_voice_clone":true}' --output out.wav
+
+# slow, deliberate read with a measured tone:
+curl -s http://127.0.0.1:8769/tts -H 'content-type: application/json' \
+  -d '{"text":"[S1] Breathe. You are exactly where you need to be.","speed":0.85,"emotion":"measured"}' --output out.wav
 ```
-Params: `text` (use `[S1]`/`[S2]` speaker tags), `use_voice_clone`, `max_new_tokens`
-(128–4096), `guidance_scale` (1–10), `temperature` (0.5–2.5), `top_p`, `top_k`.
+Params: `text` (use `[S1]`/`[S2]` speaker tags), `use_voice_clone`,
+**`speed`** (0.5–1.5, pitch-preserved pace — <1.0 = slower/enunciated, via ffmpeg `atempo`),
+**`emotion`** (`neutral|calm|measured|warm|expressive` — overrides Dia's `temperature`+`guidance_scale`),
+`max_new_tokens` (128–4096), `guidance_scale` (1–10), `temperature` (0.5–2.5), `top_p`, `top_k`.
 Returns `audio/wav` (44.1kHz).
 
 ---
