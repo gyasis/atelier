@@ -512,7 +512,15 @@ function applyHudData(pressure, telemetry, sidecars, logMetrics) {
 
   // -- tps sparkline from log metrics --
   const tpsLog = (logMetrics??[]).filter(m=>m.source==='ollama'&&m.metric==='tokens_per_sec').slice(-10).map(m=>m.value);
-  if (tpsLog.length && tpsInst) { tpsInst.data.datasets[0].data = tpsLog; tpsInst.update('none'); }
+  if (tpsLog.length && tpsInst) {
+    tpsInst.data.datasets[0].data = tpsLog;
+    // Auto-range the y-axis (was hardcoded 18–72, so fast models >72 t/s clipped flat at the
+    // top). Frame the data + the 30 t/s warn line with ~15% headroom so the peak is visible.
+    const warn = 30, hi = Math.max(warn, ...tpsLog), lo = Math.min(warn, ...tpsLog);
+    tpsInst.options.scales.y.max = Math.ceil(hi * 1.15 / 5) * 5;
+    tpsInst.options.scales.y.min = Math.max(0, Math.floor(lo * 0.85 / 5) * 5);
+    tpsInst.update('none');
+  }
 
   lastRefresh = Date.now();
 }
