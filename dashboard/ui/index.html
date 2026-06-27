@@ -608,7 +608,9 @@ new Chart(document.getElementById('memChart'), {
     plugins:{ legend:{display:false}, tooltip:{enabled:true,
       callbacks:{ title:()=>'', label:(c)=> c.datasetIndex===0 ? c.parsed.y+' GB' : null } } },
     scales:{ x:{ display:false, grid:{display:false} },
-      y:{ min:14, max:60, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
+      // max covers the full ~69GB machine (was 60 → clipped memory above 60GB flat at the
+      // top, right at the cliff where it matters most). 72 matches the HUD sparkline.
+      y:{ min:14, max:72, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
 });
 
 // ---------- Pie : starts empty, filled by live poll ----------
