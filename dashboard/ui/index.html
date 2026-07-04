@@ -796,7 +796,7 @@ function absorbTelemetry(telemetry) {
 }
 
 // Known loaded memory footprint per sidecar (when warm/busy — from model sizes)
-const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, whisper: 2.0, llamacpp: 8.0, fastmlx: 8.0, mlxlm: 8.0, comfyui: 12.0 };
+const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, whisper: 2.0, llamacpp: 8.0, fastmlx: 8.0, mlxlm: 8.0, comfyui: 12.0, colpali: 6.0 };
 
 // Routing control tower — admission-gate budget + per-backend load + queue + routing.
 // Fetches the governor's /budget directly (CSP is null). Degrades gracefully: if /budget

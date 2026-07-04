@@ -73,6 +73,7 @@ SIDECAR_BASE = {
     "radiogen": "http://127.0.0.1:8774",
     "maisi": "http://127.0.0.1:8775",
     "medner": "http://127.0.0.1:8131",
+    "colpali": "http://127.0.0.1:8779",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -83,6 +84,7 @@ SIDECAR_LOGS = {
     "radiogen": Path.home() / "Library/Logs/radiogen-sidecar.out.log",
     "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
     "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
+    "colpali": Path.home() / "Library/Logs/colpali-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -96,6 +98,7 @@ SIDECAR_LABELS = {
     "radiogen": "io.macstudio.hub.radiogen",
     "maisi": "io.macstudio.hub.maisi",
     "medner": "io.macstudio.hub.medner",
+    "colpali": "io.macstudio.hub.colpali",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
