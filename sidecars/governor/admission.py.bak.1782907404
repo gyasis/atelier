@@ -62,8 +62,6 @@ class Decision:
     eta_s: float | None = None
     reason: str = ""
     needs_idle_evict: bool = False  # head-of-queue would fit if server reclaimed idle models
-    terminal: bool = False        # can NEVER fit (est > whole live LLM ceiling) → fail fast,
-    #                               don't queue: else it head-of-line-blocks smaller jobs forever
 
 
 class Gate:
@@ -144,14 +142,6 @@ class Gate:
         """Latest measured memory from vm_stat — the hard backstop input."""
         self._live_resident_gb = resident_gb
         self._live_free_gb = free_gb
-
-    def set_budget(self, gb: float) -> None:
-        """Recompute the LLM budget LIVE each poll. The construction value is only the
-        initial ceiling; the real budget is `CLIFF − headroom − non-LLM baseline`, so as
-        macOS + other apps grow, the room left for models shrinks with them. Without this
-        the flat static budget OVERSTATES headroom (said 52 GB free when the box really
-        had ~28), which is what let a too-big model queue forever instead of failing fast."""
-        self.budget_gb = max(0.0, float(gb))
 
     def _live_blocks(self, est_gb: float) -> str:
         """Return a non-empty reason if MEASURED memory makes this grant unsafe, else ''.
@@ -295,19 +285,6 @@ class Gate:
             self._dequeue(job_id)
             return self._grant(job_id, backend, model, est_gb=e, now=now, reused=False,
                                base_url=base_url, routed=routed)
-
-        # 2b. NEVER-fits → fail FAST, don't queue. If the est exceeds the entire live LLM
-        #     ceiling (budget_gb is now CLIFF − headroom − baseline, recomputed each poll),
-        #     then even evicting every idle AND busy model can't seat it — queuing it would
-        #     only head-of-line-block smaller jobs behind it (the gemma4-vs-ornith deadlock:
-        #     35.7GB parked at the head for 425s while ornith, which fit, starved). A reused
-        #     (0GB) grant never reaches here. Terminal = the client bails instead of polling.
-        if e > self.budget_gb:
-            self._dequeue(job_id)   # make sure it isn't parked at the head
-            return Decision(grant=False, position=-1, terminal=True, reason=(
-                f"won't fit on this box: est {round(e,1)}GB > LLM ceiling "
-                f"{round(self.budget_gb,1)}GB (cliff − headroom − {round(self.committed_gb(),1)}GB "
-                f"committed − non-LLM baseline). Use a smaller model or free host memory."))
 
         # 3. Doesn't fit (or blocked by queue) → ensure queued, report position.
         self._enqueue(job_id, backend, model, e, now)

@@ -83,18 +83,30 @@ async def _load_and_warm():
         _warmed = False
 
 
-async def _unload_model():
-    global _model, _warmed, _idle_unloaded_at
-    if _model is None:
-        return
-    print(f"[omnivoice-local] idle-unload — freeing model from {DEVICE}")
-    _model = None
-    _warmed = False
-    _idle_unloaded_at = time.monotonic()
-    gc.collect()
+def _empty_accel_cache():
+    """Return freed GPU/unified memory to the OS. On MPS (Apple Silicon) this is REQUIRED —
+    without torch.mps.empty_cache() the allocator keeps the model's memory cached in-process
+    forever, so RSS never drops after unload (the 21GB phantom). CUDA needs the equivalent call."""
     if DEVICE == "cuda" and torch.cuda.is_available():
         try: torch.cuda.empty_cache()
         except Exception: pass
+    elif DEVICE == "mps":
+        try:
+            torch.mps.synchronize(); torch.mps.empty_cache()
+        except Exception as e:
+            print(f"[omnivoice-local] mps empty_cache failed: {e}")
+
+
+async def _unload_model():
+    global _model, _warmed, _idle_unloaded_at
+    had_model = _model is not None
+    if had_model:
+        print(f"[omnivoice-local] idle-unload — freeing model from {DEVICE}")
+        _model = None
+        _warmed = False
+        _idle_unloaded_at = time.monotonic()
+    gc.collect()
+    _empty_accel_cache()               # ALWAYS run — reclaims cached MPS memory even if _model was already None
 
 
 async def _idle_watcher():

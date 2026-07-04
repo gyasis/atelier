@@ -105,28 +105,13 @@ def test_reap_drops_expired():
 
 
 def test_fifo_no_jump():
-    """A later job that FITS must not jump ahead of an earlier job that is queued
-    waiting on memory to FREE (FIFO fairness for fittable jobs — still strict)."""
+    """A later small job must not jump ahead of an earlier queued big job (FIFO)."""
     g = gate(budget_gb=20.0)
     g.set_tags({})
-    run(g.admit("hold", "h", est_gb=16.0))     # granted → commits 16 of 20
-    run(g.admit("big", "m", est_gb=10.0))      # 16+10>20 but 10<=budget → QUEUED (waits), head
-    d_small = run(g.admit("small", "n", est_gb=2.0))  # 16+2<=20 fits, but behind big
+    run(g.admit("big", "m", est_gb=30.0))      # queued (over budget), head
+    d_small = run(g.admit("small", "n", est_gb=2.0))  # fits in 20, but behind big
     assert not d_small.grant and d_small.position == 1, d_small
-    print("✓ FIFO preserved — fittable small job does not jump a waiting job")
-
-
-def test_never_fits_fails_fast():
-    """A job whose est exceeds the WHOLE LLM ceiling fails FAST (terminal), is NOT queued,
-    and does not head-of-line-block a smaller job that fits (the gemma4-vs-ornith deadlock)."""
-    g = gate(budget_gb=20.0)
-    g.set_tags({})
-    d_big = run(g.admit("big", "m", est_gb=30.0))     # 30 > 20 ceiling → can never fit
-    assert not d_big.grant and d_big.terminal, d_big
-    assert not g.queue, ("a terminal job must not be queued", g.queue)
-    d_small = run(g.admit("small", "n", est_gb=2.0))  # fits, no longer blocked
-    assert d_small.grant, d_small
-    print("✓ never-fits fails fast (terminal) and doesn't block a fitting job")
+    print("✓ FIFO preserved — small job does not jump the queue")
 
 
 def test_est_gb_param_heuristic():

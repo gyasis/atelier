@@ -586,13 +586,9 @@ Chart.defaults.font.size = 9;
 Chart.defaults.color = TEXT3;
 Chart.defaults.animation = { duration: 600 };
 
-// ---------- Memory area chart — TWO bands: immovable baseline (macOS+apps) + the LLM load
-// stacked on top. The top edge = live resident (the governor's true pressure / cliff pos).
-// The gold band thickness = loaded/attributed LLM pressure. Starts empty, filled by poll.
+// ---------- Memory area chart — starts empty, filled by live poll ----------
 const memN = 60;
-const memData = new Array(memN).fill(null);   // resident (total, top edge) — null = no data
-const baseData = new Array(memN).fill(null);  // non-LLM baseline (bottom band)
-let _lastTop = [];                            // top host procs — the "where's the memory" clue
+const memData = new Array(memN).fill(null);  // null = no data yet
 const memLabels = memData.map((_,i) => i);
 
 function thresholdLine(val, color, dash){
@@ -603,37 +599,18 @@ function thresholdLine(val, color, dash){
 new Chart(document.getElementById('memChart'), {
   type:'line',
   data:{ labels: memLabels, datasets:[
-    // [0] baseline band (grey, filled to origin): macOS + apps — memory you can't reclaim
-    { label:'baseline', data: baseData, borderColor:'#5a5c66', borderWidth:1, pointRadius:0,
-      tension:0.3, fill:'origin', backgroundColor:'rgba(69,71,81,0.38)' },
-    // [1] resident = baseline + LLM (gold, filled DOWN to the baseline): the gap = LLM load,
-    //     the line itself = live resident pressure vs the warn/cliff thresholds.
-    { label:'resident', data: memData, borderColor: GOLD, borderWidth:1.5, pointRadius:0,
-      tension:0.3, fill:'-1', backgroundColor:'rgba(200,169,110,0.20)' },
+    { data: memData, borderColor: GOLD, borderWidth: 1.5, pointRadius: 0, tension: 0.3,
+      fill: true, backgroundColor: 'rgba(200,169,110,0.12)' },
     { ...thresholdLine(45, '#C99A52', [5,4]) },
     { ...thresholdLine(55, '#C2554B', [5,4]) },
   ]},
   options:{ maintainAspectRatio:false, responsive:true,
-    plugins:{ legend:{display:false}, tooltip:{enabled:true, mode:'index', intersect:false,
-      callbacks:{
-        title:()=>'',
-        label:(c)=>{
-          if (c.datasetIndex===0) return `baseline ${(+c.parsed.y).toFixed(1)} GB (macOS+apps)`;
-          if (c.datasetIndex===1){
-            const base = +(c.chart.data.datasets[0].data[c.dataIndex] ?? 0);
-            const llm = Math.max(0, c.parsed.y - base);
-            return [`LLM load ${llm.toFixed(1)} GB`, `resident ${(+c.parsed.y).toFixed(1)} GB (live)`];
-          }
-          return null;
-        },
-        afterBody:(items)=> items.some(i=>i.datasetIndex===0) && _lastTop.length
-          ? ['', 'in the baseline:'].concat(_lastTop.slice(0,5).map(p=>`  ${p.name} ${(+p.gb).toFixed(1)}G`))
-          : null,
-      } } },
+    plugins:{ legend:{display:false}, tooltip:{enabled:true,
+      callbacks:{ title:()=>'', label:(c)=> c.datasetIndex===0 ? c.parsed.y+' GB' : null } } },
     scales:{ x:{ display:false, grid:{display:false} },
-      // max covers the full ~69GB machine (72 matches the HUD sparkline). min 0 so the
-      // baseline band reads from the floor, not a clipped 14.
-      y:{ min:0, max:72, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
+      // max covers the full ~69GB machine (was 60 → clipped memory above 60GB flat at the
+      // top, right at the cliff where it matters most). 72 matches the HUD sparkline.
+      y:{ min:14, max:72, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
 });
 
 // ---------- Pie : starts empty, filled by live poll ----------
@@ -746,8 +723,7 @@ async function tauriGet(cmd) {
   return null;  // browser mode — caller will use mock data
 }
 
-const memRing = [...memData]; // rolling 60-sample buffer (resident / top edge)
-const baseRing = [...baseData]; // rolling baseline (non-LLM) buffer
+const memRing = [...memData]; // rolling 60-sample buffer
 
 // Historical tracking for sidecar "since" + cumulative tokens
 const sidecarHistory = {};
@@ -890,22 +866,13 @@ async function refreshAll() {
     type: 'atelier-data', pressure, telemetry, sidecars, logMetrics
   }, '*');
 
-  // -- Memory chart: baseline band + LLM load band, live --
+  // -- Memory chart --
   if (pressure) {
     const gb = pressure.resident_gb ?? 38.4;
-    // baseline (non-LLM floor) from the governor; fall back to resident−committed, else all-baseline
-    const base = pressure.baseline_gb
-      ?? Math.max(0, gb - (pressure.committed_gb ?? 0));
-    _lastTop = pressure.top_procs ?? _lastTop;   // residents clue for the baseline tooltip
-    memRing.push(+gb.toFixed(1));       if (memRing.length > 60) memRing.shift();
-    baseRing.push(+(+base).toFixed(1)); if (baseRing.length > 60) baseRing.shift();
+    memRing.push(+gb.toFixed(1));
+    if (memRing.length > 60) memRing.shift();
     const mc = Chart.getChart('memChart');
-    if (mc) {
-      mc.data.datasets[0].data = [...baseRing];   // baseline band
-      mc.data.datasets[1].data = [...memRing];    // resident (top edge); gap = LLM load
-      mc.data.labels = memRing.map((_,i)=>i);
-      mc.update('none');
-    }
+    if (mc) { mc.data.datasets[0].data = [...memRing]; mc.data.labels = memRing.map((_,i)=>i); mc.update('none'); }
     const nr = document.querySelector('.big-readout .n');
     if (nr) nr.textContent = gb.toFixed(1);
     document.title = `${gb.toFixed(1)} GB · ${pressure.level ?? ''}`;
@@ -943,9 +910,6 @@ async function refreshAll() {
     }
     enriched = [...byName.values()];
   }
-
-  // heaviest resident first, top-down (cold tenants → mem 0 → sink to the bottom)
-  enriched.sort((a, b) => (b.mem_gb || 0) - (a.mem_gb || 0));
 
   // -- Tenant cards (fully dynamic) --
   const grid = document.getElementById('tenantGrid');

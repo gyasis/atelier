@@ -207,19 +207,6 @@ def _sidecar_rss_gb(name: str, procs: list[tuple]) -> float | None:
     return None
 
 
-def _top_procs(procs: list[tuple], n: int = 8) -> list[dict]:
-    """Top-N host processes by RSS (GB, descending) from an EXISTING _proc_table()
-    snapshot — the 'where is the resident memory actually sitting' clue, computed for
-    free off the poll's own ps call. The baseline is death-by-a-thousand-cuts (no single
-    culprit), so this surfaces the heaviest few so a discretionary hog can be spotted."""
-    rows = sorted(procs, key=lambda p: p[2], reverse=True)[:max(1, n)]
-    out = []
-    for pid, _ppid, rss_kb, cmd in rows:
-        name = cmd.split()[0].rsplit("/", 1)[-1] if cmd else str(pid)
-        out.append({"pid": pid, "gb": round(rss_kb / 1048576, 2), "name": name})
-    return out
-
-
 # ---------- async pollers ----------
 async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
@@ -343,8 +330,6 @@ async def _poller():
                         rss = _sidecar_rss_gb(t["name"], procs)
                         if rss:
                             t["mem_gb"] = rss
-                # heaviest resident first, top-down (cold sidecars → mem 0 → sink to the bottom)
-                tenants.sort(key=lambda t: t.get("mem_gb") or 0.0, reverse=True)
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
                 level, alerts = compute_level(vm, spill_recent)
                 _state.update({
@@ -360,20 +345,6 @@ async def _poller():
                     _state["recommendation"] = None    # pressure cleared — drop any stale recommendation
                 # ---- feed the admission gate: live memory + model sizes + reconcile ----
                 await _refresh_gate(client, vm, tenants)
-                # ---- DYNAMIC budget: the LLM ceiling = cliff − headroom − non-LLM baseline,
-                # recomputed every poll (the baseline breathes as apps open/close). This is
-                # what makes admission honest: "free budget" now tracks the REAL room to the
-                # cliff instead of a flat 52GB that ignored the ~24GB macOS/app floor.
-                committed = gate.committed_gb()                       # LLM leases + untracked
-                baseline = max(0.0, round(vm["resident_gb"] - committed, 1))   # non-LLM floor
-                effective_budget = max(0.0, round(CLIFF_GB - LLM_HEADROOM_GB - baseline, 1))
-                gate.set_budget(effective_budget)
-                _state.update({
-                    "committed_gb": committed,          # loaded/attributed LLM pressure
-                    "baseline_gb": baseline,            # macOS + apps (immovable, non-LLM)
-                    "budget_gb": effective_budget,      # live LLM ceiling after subtracting baseline
-                    "top_procs": _top_procs(procs, 8),  # where the resident memory actually is
-                })
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
             await asyncio.sleep(POLL_SECONDS)
@@ -1337,10 +1308,6 @@ async def admit(req: AdmitReq):
         return {"ok": True, "grant": True, "lease_id": d.lease_id, "backend": d.backend,
                 "base_url": d.base_url, "routed": d.routed, "reserved_gb": d.reserved_gb,
                 "reused": d.reused, "ttl_s": d.ttl_s, "reason": d.reason}
-    if d.terminal:
-        # never-fits: DON'T tell the client to retry — it would poll a queue it can never win.
-        return {"ok": True, "grant": False, "terminal": True, "position": -1,
-                "reason": d.reason, "retry": None}
     return {"ok": True, "grant": False, "position": d.position, "eta_s": d.eta_s,
             "reason": d.reason, "retry": "re-POST /admit with the same job_id to re-check"}
 

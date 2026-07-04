@@ -207,19 +207,6 @@ def _sidecar_rss_gb(name: str, procs: list[tuple]) -> float | None:
     return None
 
 
-def _top_procs(procs: list[tuple], n: int = 8) -> list[dict]:
-    """Top-N host processes by RSS (GB, descending) from an EXISTING _proc_table()
-    snapshot — the 'where is the resident memory actually sitting' clue, computed for
-    free off the poll's own ps call. The baseline is death-by-a-thousand-cuts (no single
-    culprit), so this surfaces the heaviest few so a discretionary hog can be spotted."""
-    rows = sorted(procs, key=lambda p: p[2], reverse=True)[:max(1, n)]
-    out = []
-    for pid, _ppid, rss_kb, cmd in rows:
-        name = cmd.split()[0].rsplit("/", 1)[-1] if cmd else str(pid)
-        out.append({"pid": pid, "gb": round(rss_kb / 1048576, 2), "name": name})
-    return out
-
-
 # ---------- async pollers ----------
 async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
@@ -343,8 +330,6 @@ async def _poller():
                         rss = _sidecar_rss_gb(t["name"], procs)
                         if rss:
                             t["mem_gb"] = rss
-                # heaviest resident first, top-down (cold sidecars → mem 0 → sink to the bottom)
-                tenants.sort(key=lambda t: t.get("mem_gb") or 0.0, reverse=True)
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
                 level, alerts = compute_level(vm, spill_recent)
                 _state.update({
@@ -360,20 +345,6 @@ async def _poller():
                     _state["recommendation"] = None    # pressure cleared — drop any stale recommendation
                 # ---- feed the admission gate: live memory + model sizes + reconcile ----
                 await _refresh_gate(client, vm, tenants)
-                # ---- DYNAMIC budget: the LLM ceiling = cliff − headroom − non-LLM baseline,
-                # recomputed every poll (the baseline breathes as apps open/close). This is
-                # what makes admission honest: "free budget" now tracks the REAL room to the
-                # cliff instead of a flat 52GB that ignored the ~24GB macOS/app floor.
-                committed = gate.committed_gb()                       # LLM leases + untracked
-                baseline = max(0.0, round(vm["resident_gb"] - committed, 1))   # non-LLM floor
-                effective_budget = max(0.0, round(CLIFF_GB - LLM_HEADROOM_GB - baseline, 1))
-                gate.set_budget(effective_budget)
-                _state.update({
-                    "committed_gb": committed,          # loaded/attributed LLM pressure
-                    "baseline_gb": baseline,            # macOS + apps (immovable, non-LLM)
-                    "budget_gb": effective_budget,      # live LLM ceiling after subtracting baseline
-                    "top_procs": _top_procs(procs, 8),  # where the resident memory actually is
-                })
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
             await asyncio.sleep(POLL_SECONDS)
@@ -417,13 +388,9 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
                 pass
         gate.set_catalog(catalog, LLM_ROUTE_BASE)
         _tags_last = now
-    # (c) untracked load = models loaded with NO active lease (bypassed the gate).
+    # (c) untracked load = Ollama models currently loaded but not held by any lease
     loaded = [{"backend": "ollama", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
               for t in tenants if t.get("tenant") == "ollama" and t.get("name")]
-    # sidecars never take a lease, so their measured RSS is pure untracked load — count it,
-    # else /budget under-reports (the 21GB-omnivoice blind spot) and the budget path is blind.
-    loaded += [{"backend": "atelier", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
-               for t in tenants if t.get("tenant") == "atelier" and t.get("mem_gb")]
     gate.set_untracked_gb(gate.untracked_from(loaded))
     # (d) loaded set for routing: Ollama resident models + any warm LLM sidecar
     loaded_set = {("ollama", t["name"]) for t in tenants
@@ -1045,36 +1012,23 @@ async def make_room(req: MakeRoomReq):
     freed: list[dict] = []
     notes: list[str] = []
     async with httpx.AsyncClient() as client:
-        # 1. idle sidecars. With a need_gb target, evict LRU-FIRST (most-idle first) and STOP
-        #    once free ≥ target — minimal eviction preserves recently-used warm models. With
-        #    need_gb=0 (the ALARM path) evict EVERY idle sidecar (aggressive, guaranteed room).
-        idle_sidecars = []
+        # 1. idle sidecars (cheap, and /admin/unload double-checks busy)
         for name, base in SIDECAR_BASE.items():
             try:
                 d = (await client.get(f"{base}/readyz", timeout=3)).json()
             except Exception:
                 continue
             if d.get("lifecycle") == "idle":
-                idle_sidecars.append((name, base, float(d.get("idle_seconds", 0) or 0)))
-        if req.need_gb:
-            idle_sidecars.sort(key=lambda s: s[2], reverse=True)   # LRU: most-idle evicted first
-        for name, base, idle_s in idle_sidecars:
-            if req.need_gb and not req.dry_run and read_vm()["free_gb"] >= req.need_gb:
-                notes.append(f"target {req.need_gb}GB reached — stopped before {name} (LRU-preserved)")
-                break
-            if req.dry_run:
-                freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "would_evict": True})
-            else:
-                try:
-                    r = (await client.post(f"{base}/admin/unload", timeout=12)).json()
-                    freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "result": r})
-                    await asyncio.sleep(0.8)   # let macOS reclaim before the next free re-check
-                except Exception as e:
-                    notes.append(f"{name} unload failed: {e}")
-        # 2. Ollama loaded models — only if still short on room and not actively generating
-        if req.need_gb and not req.dry_run and read_vm()["free_gb"] >= req.need_gb:
-            notes.append("target reached via idle sidecars — ollama left loaded")
-        elif _ollama_recently_active():
+                if req.dry_run:
+                    freed.append({"tenant": "atelier", "name": name, "would_evict": True})
+                else:
+                    try:
+                        r = (await client.post(f"{base}/admin/unload", timeout=12)).json()
+                        freed.append({"tenant": "atelier", "name": name, "result": r})
+                    except Exception as e:
+                        notes.append(f"{name} unload failed: {e}")
+        # 2. Ollama loaded models — only if not actively generating
+        if _ollama_recently_active():
             notes.append("ollama skipped — inference call within last 15s")
         else:
             try:
@@ -1316,10 +1270,7 @@ async def admit(req: AdmitReq):
     if not d.grant and d.needs_idle_evict and (time.time() - _last_admit_evict) > ADMIT_EVICT_COOLDOWN:
         _last_admit_evict = time.time()
         try:
-            # Target only the room THIS admit needs → LRU-bounded eviction (make_room stops
-            # once free ≥ need_gb), instead of blindly unloading every idle sidecar.
-            _need = (req.est_gb or LLM_DEFAULT_EST_GB) + LLM_LIVE_FLOOR_GB
-            res = await make_room(MakeRoomReq(dry_run=False, need_gb=_need))
+            res = await make_room(MakeRoomReq(dry_run=False))
             freed = [f.get("name") for f in res.get("freed", []) if f.get("evicted") or f.get("result")]
             if freed:
                 # refresh the gate's untracked view immediately so the retry sees the room
@@ -1337,10 +1288,6 @@ async def admit(req: AdmitReq):
         return {"ok": True, "grant": True, "lease_id": d.lease_id, "backend": d.backend,
                 "base_url": d.base_url, "routed": d.routed, "reserved_gb": d.reserved_gb,
                 "reused": d.reused, "ttl_s": d.ttl_s, "reason": d.reason}
-    if d.terminal:
-        # never-fits: DON'T tell the client to retry — it would poll a queue it can never win.
-        return {"ok": True, "grant": False, "terminal": True, "position": -1,
-                "reason": d.reason, "retry": None}
     return {"ok": True, "grant": False, "position": d.position, "eta_s": d.eta_s,
             "reason": d.reason, "retry": "re-POST /admit with the same job_id to re-check"}
 

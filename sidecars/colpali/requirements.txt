@@ -1,0 +1,8 @@
+colpali-engine>=0.3.5
+torch
+torchvision
+transformers>=4.46
+fastapi
+uvicorn
+pillow
+numpy
