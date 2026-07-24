@@ -61,6 +61,12 @@ OLLAMA_LOG = Path(os.environ.get("OLLAMA_LOG", str(Path.home() / ".ollama/logs/s
 # (d) auto pressure-watcher: on ALARM, auto-run make-room (idle eviction only).
 AUTO_MAKE_ROOM = os.environ.get("ATELIER_AUTO_MAKE_ROOM", "1") not in ("0", "false", "no")
 AUTO_COOLDOWN = float(os.environ.get("ATELIER_AUTO_COOLDOWN", "60"))  # min seconds between auto evictions
+# (g) AUTO-HEAL — Law 1 enforced from OUTSIDE. A sidecar reporting state=cold (model unloaded) that
+# still holds > FLOOR GB is LEAKING; after a grace period, hard-restart it via launchd. The
+# GovernedSidecar framework self-heals first — this backstops anything bespoke / non-self-healing.
+AUTOHEAL = os.environ.get("ATELIER_AUTOHEAL", "1") not in ("0", "false", "no")
+AUTOHEAL_FLOOR_GB = float(os.environ.get("ATELIER_AUTOHEAL_FLOOR_GB", "1.5"))
+AUTOHEAL_GRACE_S = float(os.environ.get("ATELIER_AUTOHEAL_GRACE_S", "150"))
 
 SIDECAR_BASE = {
     "omnivoice": "http://127.0.0.1:8770",
@@ -74,6 +80,7 @@ SIDECAR_BASE = {
     "maisi": "http://127.0.0.1:8775",
     "medner": "http://127.0.0.1:8131",
     "colpali": "http://127.0.0.1:8779",
+    "tabfm": "http://127.0.0.1:8781",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -85,6 +92,7 @@ SIDECAR_LOGS = {
     "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
     "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
     "colpali": Path.home() / "Library/Logs/colpali-sidecar.out.log",
+    "tabfm": Path.home() / "Library/Logs/tabfm-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -99,6 +107,7 @@ SIDECAR_LABELS = {
     "maisi": "io.macstudio.hub.maisi",
     "medner": "io.macstudio.hub.medner",
     "colpali": "io.macstudio.hub.colpali",
+    "tabfm": "io.macstudio.hub.tabfm",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
@@ -112,6 +121,9 @@ LLM_DEFAULT_EST_GB = float(os.environ.get("ATELIER_LLM_DEFAULT_EST_GB", "18"))
 # Seed estimates for non-Ollama backends / before /api/tags is cached. Substring match.
 _EST_OVERRIDES = {
     "qwen3-coder-next": 50.0, "deepseek-r1:70b": 43.0,
+    # fastcontext-{rl,sft}: 4B Qwen3 GGUF, alias has no "4b" so the name heuristic
+    # falls to the 18GB blind default → spurious admit-hang. Real resident ~13GB @ 64K ctx.
+    "fastcontext": 13.0,
 }
 LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
 gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,
@@ -127,6 +139,8 @@ _state = {
     "recommendation": None,   # (d) force-stop the agent should surface for human authorization
 }
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
+_cold_heavy_since: dict = {}   # (g) name -> monotonic ts a sidecar first went cold-but-heavy
+_autoheal_log = collections.deque(maxlen=20)   # (g) recent auto-heal restarts (surfaced in /pressure)
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
 _proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
 _internal_skip = collections.deque(maxlen=50)   # (path, ts) the governor's OWN probe fired — skip its GIN line
@@ -246,10 +260,19 @@ async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
 async def poll_sidecar(client: httpx.AsyncClient, name: str, url: str) -> dict:
     try:
         d = (await client.get(url, timeout=3)).json()
+        governed = ("reclaim_margin_gb" in d) or ("cold_rss_gb" in d)  # on the GovernedSidecar framework
         return {"tenant": "atelier", "name": name,
                 "state": d.get("lifecycle", "cold"),
                 "active_jobs": d.get("active_jobs", 0),
-                "queue_depth": d.get("queue_depth", 0)}
+                "queue_depth": d.get("queue_depth", 0),
+                # constitution surface for the dashboard:
+                "keep_warm": bool(d.get("keep_warm")),           # WARM TAG (allowed to stay resident)
+                "active_elapsed_s": d.get("active_elapsed_s"),   # how long the current job has run
+                "device": d.get("device"),                       # mps|cuda|mlx|coreml|remote
+                "model": d.get("model"),                         # currently-loaded model (None=cold)
+                "available_models": d.get("available_models"),   # multi-model lanes (llamacpp menu)
+                "cold_rss_gb": d.get("cold_rss_gb"),             # baseline (reclaim floor)
+                "governed": governed}                            # framework-managed vs bespoke
     except Exception:
         return {"tenant": "atelier", "name": name, "state": "unreachable"}
 
@@ -329,6 +352,45 @@ async def _auto_relieve(vm: dict, tenants: list[dict]):
         _state["recommendation"] = None
 
 
+def _autoheal_check(tenants: list[dict]) -> None:
+    """(g) Enforce Law 1 from OUTSIDE. If an atelier sidecar reports state=cold (model unloaded) yet
+    still holds > AUTOHEAL_FLOOR_GB for longer than AUTOHEAL_GRACE_S, it leaked — hard-restart it via
+    launchd (kickstart -k). Self-healing (GovernedSidecar restart-reclaim) fixes it first; this is the
+    backstop so even a bespoke / non-self-healing sidecar can't hold leaked memory indefinitely."""
+    if not AUTOHEAL:
+        return
+    now = time.monotonic()
+    for t in tenants:
+        if t.get("tenant") != "atelier":
+            continue
+        name = t.get("name")
+        mem = t.get("mem_gb") or 0.0
+        leaking = t.get("state") == "cold" and mem > AUTOHEAL_FLOOR_GB
+        if not leaking:
+            _cold_heavy_since.pop(name, None)
+            continue
+        since = _cold_heavy_since.get(name)
+        if since is None:
+            _cold_heavy_since[name] = now
+            continue
+        if now - since < AUTOHEAL_GRACE_S:
+            continue
+        dur = int(now - since)
+        _cold_heavy_since.pop(name, None)
+        label = SIDECAR_LABELS.get(name)
+        if not label:
+            continue
+        try:
+            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                           check=True, capture_output=True, timeout=15)
+            print(f"[governor] AUTOHEAL restarted {name}: state=cold but held {mem}GB "
+                  f"> {AUTOHEAL_FLOOR_GB}GB for {dur}s — kickstart -k", flush=True)
+            _autoheal_log.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "name": name,
+                                  "held_gb": mem, "held_s": dur, "action": "kickstart -k"})
+        except Exception as e:
+            print(f"[governor] AUTOHEAL kickstart {name} failed: {e}", flush=True)
+
+
 async def _poller():
     async with httpx.AsyncClient() as client:
         while True:
@@ -341,11 +403,20 @@ async def _poller():
                 # not the dashboard's hardcoded SIDECAR_MEM guesses)
                 procs = _proc_table()
                 for t in tenants:
+                    # Measure RSS for EVERY atelier sidecar incl. COLD ones — a cold sidecar still
+                    # holding memory IS the leak we must see (and auto-heal). Only skip unreachable.
                     if (t.get("tenant") == "atelier" and not t.get("mem_gb")
-                            and t.get("state") not in (None, "cold", "unreachable")):
+                            and t.get("state") not in (None, "unreachable")):
                         rss = _sidecar_rss_gb(t["name"], procs)
                         if rss:
                             t["mem_gb"] = rss
+                # The governor NEVER emits a null memory reading — a "no value" (unmeasured /
+                # unreachable / not admitted) is always 0, so no consumer (donut, budget, grid)
+                # ever sees null/NaN. "admits no" → 0.
+                for t in tenants:
+                    if t.get("mem_gb") is None:
+                        t["mem_gb"] = 0.0
+                _autoheal_check(tenants)   # constitution enforced from OUTSIDE: cold-but-heavy → restart
                 # heaviest resident first, top-down (cold sidecars → mem 0 → sink to the bottom)
                 tenants.sort(key=lambda t: t.get("mem_gb") or 0.0, reverse=True)
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
@@ -376,6 +447,13 @@ async def _poller():
                     "baseline_gb": baseline,            # macOS + apps (immovable, non-LLM)
                     "budget_gb": effective_budget,      # live LLM ceiling after subtracting baseline
                     "top_procs": _top_procs(procs, 8),  # where the resident memory actually is
+                    "autoheal": list(_autoheal_log),    # (g) recent Law-1 auto-restarts
+                    "constitution": {                   # the Atelier framework, surfaced for the dashboard
+                        "laws": ["no memory leaks", "never unload an actively-working model",
+                                 "queue calls under pressure"],
+                        "autoheal": {"enabled": AUTOHEAL, "floor_gb": AUTOHEAL_FLOOR_GB,
+                                     "grace_s": AUTOHEAL_GRACE_S},
+                        "cliff_gb": CLIFF_GB, "warn_gb": WARN_GB},
                 })
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
@@ -1051,26 +1129,41 @@ async def make_room(req: MakeRoomReq):
         # 1. idle sidecars. With a need_gb target, evict LRU-FIRST (most-idle first) and STOP
         #    once free ≥ target — minimal eviction preserves recently-used warm models. With
         #    need_gb=0 (the ALARM path) evict EVERY idle sidecar (aggressive, guaranteed room).
-        idle_sidecars = []
+        idle_all = []
         for name, base in SIDECAR_BASE.items():
             try:
                 d = (await client.get(f"{base}/readyz", timeout=3)).json()
             except Exception:
                 continue
             if d.get("lifecycle") == "idle":
-                idle_sidecars.append((name, base, float(d.get("idle_seconds", 0) or 0)))
+                idle_all.append((name, base, float(d.get("idle_seconds", 0) or 0),
+                                 bool(d.get("keep_warm"))))   # respect the WARM TAG
+        # WARM TAG: a sidecar advertising keep_warm=true has opted to stay resident (e.g. whisper
+        # for chiron latency). Evict every NON-warm idle sidecar first; a warm-tagged one is
+        # touched only as a last resort — target still unmet (need_gb), or still over the cliff.
+        non_warm = [s for s in idle_all if not s[3]]
+        warm = [s for s in idle_all if s[3]]
         if req.need_gb:
-            idle_sidecars.sort(key=lambda s: s[2], reverse=True)   # LRU: most-idle evicted first
-        for name, base, idle_s in idle_sidecars:
+            non_warm.sort(key=lambda s: s[2], reverse=True)   # LRU: most-idle evicted first
+            warm.sort(key=lambda s: s[2], reverse=True)
+        for name, base, idle_s, kw in non_warm + warm:      # warm ones always come LAST
             if req.need_gb and not req.dry_run and read_vm()["free_gb"] >= req.need_gb:
-                notes.append(f"target {req.need_gb}GB reached — stopped before {name} (LRU-preserved)")
+                notes.append(f"target {req.need_gb}GB reached — stopped before {name}"
+                             + (" (WARM-tagged, preserved)" if kw else " (LRU-preserved)"))
                 break
+            # ALARM sweep (need_gb=0): preserve a WARM-tagged sidecar unless we're STILL over the
+            # cliff. This is a DECISION (shown in dry-run too), not just an action.
+            if kw and not req.need_gb and read_vm()["resident_gb"] < CLIFF_GB:
+                notes.append(f"{name} WARM-tagged + below cliff — preserved")
+                continue
             if req.dry_run:
-                freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "would_evict": True})
+                freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s),
+                              "keep_warm": kw, "would_evict": True})
             else:
                 try:
                     r = (await client.post(f"{base}/admin/unload", timeout=12)).json()
-                    freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "result": r})
+                    freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s),
+                                  "keep_warm": kw, "result": r})
                     await asyncio.sleep(0.8)   # let macOS reclaim before the next free re-check
                 except Exception as e:
                     notes.append(f"{name} unload failed: {e}")
@@ -1365,6 +1458,7 @@ PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
 # --- auto-size num_ctx to the prompt (so long inputs aren't silently truncated) ---
 PROXY_CTX_DEFAULT = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384"))  # the cheap baseline window
 PROXY_CTX_CEILING = int(os.environ.get("ATELIER_PROXY_CTX_CEILING", "32768"))  # don't grow past this
+PROXY_CTX_HEADROOM_RESERVE_GB = float(os.environ.get("ATELIER_PROXY_CTX_HEADROOM_RESERVE_GB", "2"))  # GB kept free above the KV cache
 CHARS_PER_TOKEN = float(os.environ.get("ATELIER_CHARS_PER_TOKEN", "3.5"))  # rough, overestimates slightly
 KV_DTYPE_BYTES = float(os.environ.get("ATELIER_KV_DTYPE_BYTES", "2"))      # f16 KV cache = 2 bytes/elem
 _ollama_meta_cache: dict[str, dict] = {}
@@ -1416,7 +1510,41 @@ def _prompt_chars(body: dict) -> int:
     return len(str(body.get("prompt", "")))
 
 
-def _autosize_ctx(body: dict, native_max: int, prompt_chars: int) -> int | None:
+def _headroom_ctx_ceiling(model: str, native_max: int) -> int:
+    """Largest num_ctx whose KV cache still fits the governor's LIVE free budget.
+    Replaces a static ceiling so a model with memory to spare can grow to its full
+    native window instead of a fixed 32K cap. KV is linear: est_gb = weights +
+    kv_rate*ctx, so the memory-safe ceiling solves kv_rate*ctx <= free - weights -
+    reserve. Falls back to the static PROXY_CTX_CEILING when the per-model KV rate
+    is unknown (arch we couldn't parse) or memory is tight."""
+    hard = native_max or PROXY_CTX_CEILING
+    rate = gate._kv_rate_for(model)                       # GB per token
+    if rate <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    kv_budget = gate.free_budget_gb() - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
+    if kv_budget <= 0:
+        return min(PROXY_CTX_CEILING, hard)               # tight memory → stay conservative
+    fit = int(kv_budget / rate)
+    return max(PROXY_CTX_DEFAULT, min(fit, hard))         # never below default, never past native max
+
+
+def _governor_safe_ctx(model: str, native_max: int) -> int:
+    """The largest context window this model can SAFELY use if it had the whole LLM
+    budget to itself — stable (uses gate.budget_gb, not live free budget, so /api/show
+    reports don't fluctuate). Clients auto-detecting context from /api/show get a
+    memory-safe number instead of the model's (misleading) native max."""
+    hard = native_max or PROXY_CTX_CEILING
+    rate = gate._kv_rate_for(model)
+    if rate <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    kv_budget = gate.budget_gb - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
+    if kv_budget <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    fit = int(kv_budget / rate)
+    return max(PROXY_CTX_DEFAULT, min(fit, hard))
+
+
+def _autosize_ctx(body: dict, model: str, native_max: int, prompt_chars: int) -> int | None:
     """If the estimated prompt won't fit the default window, return a larger num_ctx
     (next power of two, bounded by the ceiling and the model's native max). None = leave
     the default. Respects a caller-supplied num_ctx."""
@@ -1430,7 +1558,7 @@ def _autosize_ctx(body: dict, native_max: int, prompt_chars: int) -> int | None:
     target = PROXY_CTX_DEFAULT
     while target < est:
         target *= 2
-    ceiling = min(PROXY_CTX_CEILING, native_max) if native_max else PROXY_CTX_CEILING
+    ceiling = _headroom_ctx_ceiling(model, native_max)   # memory-aware, not a static 32K cap
     target = min(target, ceiling)
     return target if target > PROXY_CTX_DEFAULT else None
 
@@ -1515,6 +1643,37 @@ async def llm_proxy(backend: str, path: str, request: Request):
     url = f"{base}/{path}"
     job_id = f"proxy-{backend}-{secrets.token_hex(4)}"
 
+    # Honest-endpoint rewrite: ollama clients (Goose/OpenCode) auto-detect a model's
+    # context window from /api/show's model_info.*.context_length. Left unmodified,
+    # that's the model's NATIVE max — which can far exceed what the governor's memory
+    # budget can actually hold, so a client-side auto-sized ctx can blow the box. Rewrite
+    # every *.context_length to a memory-safe ceiling instead. Not gated through admission
+    # (it's metadata, not an inference call) and never blocks — any failure falls back to
+    # forwarding the upstream response verbatim.
+    if backend == "ollama" and path == "api/show":
+        await _ollama_meta(model)   # populate gate's kv_rate for this model
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, content=raw,
+                                      headers={"content-type": "application/json"})
+            data = r.json()
+            info = data.get("model_info") or {}
+            arch = info.get("general.architecture")
+            native = int(info.get(f"{arch}.context_length") or 0) if arch else 0
+            safe = _governor_safe_ctx(model, native)
+            for k in list(info.keys()):
+                if k.endswith("context_length"):
+                    info[k] = safe
+            data["model_info"] = info
+            return JSONResponse(data, status_code=r.status_code)
+        except Exception:
+            # never let a rewrite bug break /api/show — forward unmodified
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, content=raw,
+                                      headers={"content-type": "application/json"})
+            return Response(content=r.content, status_code=r.status_code,
+                            media_type=r.headers.get("content-type", "application/json"))
+
     # Auto-size the context window to the prompt so long inputs aren't silently truncated
     # at the cheap default. Ollama-only (num_ctx is Ollama's knob); OpenAI sidecars manage
     # their own context. If we grow it, re-serialize the body so the runner gets num_ctx.
@@ -1524,7 +1683,7 @@ async def llm_proxy(backend: str, path: str, request: Request):
     est_hint = 0.0
     if backend == "ollama" and path in ("api/chat", "api/generate"):
         meta = await _ollama_meta(model)
-        chosen_ctx = _autosize_ctx(body, meta["native_ctx"], _prompt_chars(body))
+        chosen_ctx = _autosize_ctx(body, model, meta["native_ctx"], _prompt_chars(body))
         if chosen_ctx:
             body.setdefault("options", {})["num_ctx"] = chosen_ctx
             raw = json.dumps(body).encode()
@@ -1586,3 +1745,21 @@ async def llm_proxy(backend: str, path: str, request: Request):
     finally:
         if lease:
             await gate.release(job_id=job_id)
+
+
+@app.get("/llm/{backend}/{path:path}")
+async def llm_proxy_get(backend: str, path: str, request: Request):
+    """GET passthrough for the metadata/listing calls ollama clients make (api/tags,
+    api/version, v1/models) — the POST-only proxy above 404s on these, which breaks
+    client auto-configuration before it even gets to a chat/generate call."""
+    base = LLM_ROUTE_BASE.get(backend)
+    if not base:
+        return JSONResponse({"ok": False, "error": f"unknown backend '{backend}' "
+                             f"(use {list(LLM_ROUTE_BASE)})"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{base}/{path}", params=dict(request.query_params))
+        return Response(content=r.content, status_code=r.status_code,
+                        media_type=r.headers.get("content-type", "application/json"))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
