@@ -81,6 +81,9 @@ SIDECAR_BASE = {
     "medner": "http://127.0.0.1:8131",
     "colpali": "http://127.0.0.1:8779",
     "tabfm": "http://127.0.0.1:8781",
+    "rerank": "http://127.0.0.1:8778",
+    "pyannote": "http://127.0.0.1:8767",
+    "audio-llm": "http://127.0.0.1:8768",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -93,6 +96,9 @@ SIDECAR_LOGS = {
     "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
     "colpali": Path.home() / "Library/Logs/colpali-sidecar.out.log",
     "tabfm": Path.home() / "Library/Logs/tabfm-sidecar.out.log",
+    "rerank": Path.home() / "Library/Logs/rerank-sidecar.out.log",
+    "pyannote": Path.home() / "Library/Logs/pyannote-sidecar.out.log",
+    "audio-llm": Path.home() / "Library/Logs/audio-llm-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -108,6 +114,9 @@ SIDECAR_LABELS = {
     "medner": "io.macstudio.hub.medner",
     "colpali": "io.macstudio.hub.colpali",
     "tabfm": "io.macstudio.hub.tabfm",
+    "rerank": "io.macstudio.hub.rerank",
+    "pyannote": "io.macstudio.hub.pyannote",
+    "audio-llm": "io.macstudio.hub.audio-llm",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
@@ -876,8 +885,27 @@ SIDECAR_ROLES = {
     "fastmlx": "LLM/VLM — FastMLX (MLX-native), OpenAI-compatible [blocked: upstream]",
     "mlxlm": "LLM — Apple mlx_lm.server (MLX-native), OpenAI-compatible",
     "medner": "NER — medical entity extraction (GLiNER + d4data + scispaCy, MPS)",
+    "colpali": "Retrieval — ColPali visual-document scoring/embeddings (MPS)",
+    "tabfm": "Tabular — Tabular Foundation Models (TabPFN-3 + Google TabFM): predict/fit-cache/embed on parquet",
+    "rerank": "Rerank — cross-encoder BAAI/bge-reranker-v2-m3 (query,passages→scores) (MPS)",
+    "pyannote": "Diarization — speaker diarization (pyannote.audio): who-spoke-when (MPS)",
+    "audio-llm": "Audio understanding — classify/describe an audio track (multi-model: Qwen2-Audio/Voxtral/Qwen3-Omni, MLX)",
 }
-AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner"}
+AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner",
+                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm"}
+
+# Present on the box but NOT governed sidecars (no admit/unload contract). Surfaced in /agent so
+# an agent has the COMPLETE picture — but the governor CANNOT admit/evict these; their memory sits
+# in baseline_gb. `probe` is a GET that returns 200 when the service is up (for live-state on expand).
+OTHER_SERVICES = {
+    "comfyui": {
+        "base_url": "http://127.0.0.1:8188",
+        "role": "Image/video generation (ComfyUI) — node-graph UI + API",
+        "probe": "/system_stats",
+        "note": "NOT a governed sidecar: no /admin/unload, so the governor can't idle-evict it and "
+                "its VRAM/RAM counts as baseline_gb. Stop it manually if the box is under memory pressure.",
+    },
+}
 
 async def _fetch_agent_manifest(client: httpx.AsyncClient, url: str) -> dict:
     """Pull one sidecar's /agent. GET /agent never wakes a model, so expanding is
@@ -898,14 +926,20 @@ async def agent(expand: bool = False):
 
     Add ?expand=true to inline EVERY sidecar's full /agent manifest in this one
     response (concurrent fan-out) — one round-trip, no follow-up fetches."""
+    live = {t.get("name"): t for t in _state.get("tenants", [])}   # fold in live health (from the poller)
     sidecars = {}
     for name, base in SIDECAR_BASE.items():
+        lt = live.get(name, {})
         sidecars[name] = {
             "base_url": base,
             "role": SIDECAR_ROLES.get(name, "sidecar"),
+            "state": lt.get("state", "unknown"),   # cold | idle | busy | unreachable
+            "mem_gb": lt.get("mem_gb"),
             "readyz": f"{base}/readyz",
             "agent": f"{base}/agent" if name in AGENT_CAPABLE else None,
         }
+    other = {n: {"base_url": m["base_url"], "role": m["role"], "governed": False, "note": m["note"]}
+             for n, m in OTHER_SERVICES.items()}
     if expand:
         token = os.environ.get("HUB_TOKEN")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -914,6 +948,12 @@ async def agent(expand: bool = False):
             manifests = await asyncio.gather(
                 *[_fetch_agent_manifest(client, f"{b}/agent") for _, b in capable]
             )
+            for n, m in OTHER_SERVICES.items():   # live-probe the ungoverned apps too
+                try:
+                    r = await client.get(m["base_url"] + m.get("probe", "/"), timeout=2)
+                    other[n]["state"] = "up" if r.status_code < 500 else "down"
+                except Exception:
+                    other[n]["state"] = "down"
         for (n, _), manifest in zip(capable, manifests):
             sidecars[n]["manifest"] = manifest
     return {
@@ -967,6 +1007,24 @@ async def agent(expand: bool = False):
             "POST /force-stop": "human-gated preempt of a BUSY model",
         },
         "sidecars": sidecars,
+        "other_services": other,   # present on the box but NOT governed (comfyui, etc.) — see each note
+        "context": {
+            "why_it_matters": "num_ctx (context window) is a MEMORY decision on the Mac's unified RAM. "
+                              "Too SMALL chokes/truncates a local model → bad or cut-off answers. Too BIG "
+                              "blows the KV-cache past free memory → the box SWAP-DEATHS (e.g. ornith-35b's "
+                              "native 262144 ≈ ~40 GB of KV). NEVER guess a num_ctx by hand.",
+            "governed (anything heavy)": "Call THROUGH the governor (POST /llm/{backend}/{path}) and OMIT "
+                                         "num_ctx — it auto-sizes to your prompt + live free memory, capped "
+                                         "safe (never the naive native max). Point any Ollama client (e.g. "
+                                         "Goose) at http://192.168.0.159:8799/llm/ollama and it auto-detects "
+                                         "a safe window from the rewritten /api/show — zero manual pinning.",
+            "raw :11434 callers": "For calls that bypass the governor, use the `ollama-ctx` dial "
+                                  "(~/.local/bin/ollama-ctx: list | global <N> | set <model> <N|max> | "
+                                  "research). Global default was raised 16384→131072 (a silent Ollama.app "
+                                  "sqlite ceiling); per-model trained-max in ~/.config/ollama-ctx/registry.json.",
+            "rule": "The governor is the ONE place that knows live memory — use it for anything heavy and "
+                    "you never hand-tune num_ctx again. See R-AG5/R-AG6 in atelier-governor.md.",
+        },
         "ollama": {"base_url": OLLAMA_URL, "role": "LLM + embeddings + VLM",
                    "list_loaded": f"{OLLAMA_URL}/api/ps",
                    "via_gate": "prefer POST /llm/ollama/... so calls are admitted + captured"},
@@ -1529,15 +1587,17 @@ def _headroom_ctx_ceiling(model: str, native_max: int) -> int:
 
 
 def _governor_safe_ctx(model: str, native_max: int) -> int:
-    """The largest context window this model can SAFELY use if it had the whole LLM
-    budget to itself — stable (uses gate.budget_gb, not live free budget, so /api/show
-    reports don't fluctuate). Clients auto-detecting context from /api/show get a
-    memory-safe number instead of the model's (misleading) native max."""
+    """The largest context window this model can safely use under normal operating
+    memory. Sized from WARN_GB (a FIXED constant = the safe-operating LLM envelope),
+    NOT the live gate.budget_gb (= cliff - headroom - transient baseline), which
+    collapses when non-LLM memory spikes (macOS indexing, leaky sidecars) and would lock
+    a tiny window into a client that auto-detects at a bad moment. Actual chats are
+    clamped to LIVE memory in _autosize_ctx, so this report stays stable + optimistic."""
     hard = native_max or PROXY_CTX_CEILING
     rate = gate._kv_rate_for(model)
     if rate <= 0:
         return min(PROXY_CTX_CEILING, hard)
-    kv_budget = gate.budget_gb - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
+    kv_budget = WARN_GB - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
     if kv_budget <= 0:
         return min(PROXY_CTX_CEILING, hard)
     fit = int(kv_budget / rate)
@@ -1549,8 +1609,14 @@ def _autosize_ctx(body: dict, model: str, native_max: int, prompt_chars: int) ->
     (next power of two, bounded by the ceiling and the model's native max). None = leave
     the default. Respects a caller-supplied num_ctx."""
     opts = body.get("options") or {}
-    if opts.get("num_ctx"):                      # caller decided — never override
-        return None
+    caller_ctx = opts.get("num_ctx")
+    if caller_ctx:
+        # Respect a caller's num_ctx, but CLAMP it down to what fits LIVE memory — a
+        # client (e.g. Goose auto-detecting a big window from /api/show) must never be
+        # able to force a context the box can't hold. Returning the clamped value also
+        # gives admission the correct estimate (est_gb below uses chosen_ctx).
+        ceiling = _headroom_ctx_ceiling(model, native_max)
+        return min(int(caller_ctx), ceiling)
     reserve = max(1024, int(opts.get("num_predict") or 0))   # room for the response
     est = int(prompt_chars / CHARS_PER_TOKEN) + reserve
     if est <= PROXY_CTX_DEFAULT:                 # fits the cheap window → leave it
