@@ -6,3 +6,7 @@ __pycache__/
 .idea/
 .vscode/
 voices/*.bak.*
+
+# agent/session backups — never commit
+*.bak.*
+*.bak

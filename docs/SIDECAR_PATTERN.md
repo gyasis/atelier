@@ -117,3 +117,7 @@ atelier-status --watch              # live updating
 atelier-status --unload <name>      # force-evict one
 atelier-status --json | jq          # programmatic consumption
 ```
+
+> **Formalized 2026-07-06:** this by-hand pattern is now the shared **GovernedSidecar** framework —
+> see [GOVERNED_SIDECAR_FRAMEWORK.md](GOVERNED_SIDECAR_FRAMEWORK.md) (the 3-law constitution + how a
+> new sidecar hooks in).

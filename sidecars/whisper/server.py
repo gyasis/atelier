@@ -147,6 +147,36 @@ def _mlx_clear_cache() -> None:
         pass
 
 
+# ---------- Law 1: reclaim (MLX mx.clear_cache can't return RSS on Metal → self-restart) ----------
+# whisper models are 1.6 GB (turbo) – 3 GB (large) and cold baseline is ~0.2 GB, so a 1.0 GB
+# floor reliably catches a leaked model (mx.clear_cache can't return it). Only used when NOT
+# KEEP_WARM — a warm-tagged whisper stays resident by design and never hits this path.
+RECLAIM_THRESHOLD_GB = float(os.environ.get("RECLAIM_THRESHOLD_GB", "1.0"))
+
+
+def _self_rss_gb() -> float:
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                             capture_output=True, text=True, timeout=3).stdout.strip()
+        return round(int(out) / 1048576, 2) if out else 0.0
+    except Exception:
+        return 0.0
+
+
+def _reclaim_via_restart(reason: str) -> None:
+    """mx.clear_cache() can't hand RSS back to the OS on Metal, so a logical unload leaves the
+    whisper model(s) resident. The only reliable reclaim is to exit + let launchd relaunch cold.
+    Non-zero exit → KeepAlive{SuccessfulExit:false} restarts. Callers guard on idle (no job lost)."""
+    print(f"[whisper] {reason}: RSS={_self_rss_gb()}GB still mapped after unload — self-restarting "
+          f"to return MLX memory to the OS (launchd relaunches cold)", flush=True)
+    os._exit(42)
+
+
+async def _delayed_restart(delay: float, reason: str) -> None:
+    await asyncio.sleep(delay)   # let the HTTP response flush first
+    _reclaim_via_restart(reason)
+
+
 async def _load_and_warm(repo: str = DEFAULT_MODEL) -> None:
     """Cold-load `repo` into mlx-whisper's loader cache + warm it. Idempotent
     for the same repo. Caller must hold _sem."""
@@ -197,6 +227,9 @@ async def _idle_watcher() -> None:
             async with _sem:
                 if _loaded_model is not None and _active == 0:
                     await _unload_model()
+                    # MLX clear_cache can't return RSS — restart to actually free it (idle, sem-held).
+                    if _self_rss_gb() > RECLAIM_THRESHOLD_GB:
+                        _reclaim_via_restart("idle-unload")
 
 
 @asynccontextmanager
@@ -862,7 +895,14 @@ async def admin_unload(request: Request):
     if was is not None:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was is not None, "forced": force, "model": was}
+    # On MLX, clear_cache doesn't return RSS — if memory is still mapped, self-restart to reclaim
+    # (delay so this response flushes first). Catches both just-unloaded and prior-leak cases.
+    reclaim, rss = "mlx_clear_cache", _self_rss_gb()
+    if rss > RECLAIM_THRESHOLD_GB:
+        reclaim = "process-restart"
+        asyncio.create_task(_delayed_restart(0.6, "admin/unload"))
+    return {"unloaded": was is not None, "forced": force, "model": was,
+            "reclaim": reclaim, "rss_gb": rss}
 
 
 # ---------- HTTP: sync transcribe ----------
