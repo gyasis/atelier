@@ -23,6 +23,7 @@ Endpoints:
 Env: AUDIO_LLM_DEFAULT · AUDIO_LLM_MODELS(json) · IDLE_UNLOAD_S(180) · RECLAIM_THRESHOLD_GB(1.0) · KEEP_WARM
 """
 import os, sys, time, json, tempfile, threading, subprocess, urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -52,7 +53,21 @@ CLASSIFY_PROMPT = (
 )
 _CATS = ["audio_description", "clean_dialogue", "commentary", "dubbed", "music"]
 
-app = FastAPI(title="audio-llm-sidecar")
+@asynccontextmanager
+async def _lifespan(app):
+    """Start the idle-unload watcher — under UVICORN, not just `python server.py`.
+
+    launchd runs this as `python -m uvicorn server:app`, which IMPORTS the module
+    (__name__ == "server"), so a thread started from the `if __name__ == "__main__"`
+    block below never ran: IDLE_UNLOAD_S was dead config and the model stayed resident
+    forever once loaded. A lifespan fires on BOTH launch paths."""
+    threading.Thread(target=_idle_watch, daemon=True).start()
+    print(f"[audio-llm] idle-watcher started (unload after {IDLE_UNLOAD_S}s idle, "
+          f"keep_warm={KEEP_WARM})", flush=True)
+    yield
+
+
+app = FastAPI(title="audio-llm-sidecar", lifespan=_lifespan)
 _model = None
 _alias = None
 _lock = threading.Lock()
@@ -189,5 +204,6 @@ async def describe(file: UploadFile = File(None), path: str = Form(None), url: s
 
 
 if __name__ == "__main__":
-    threading.Thread(target=_idle_watch, daemon=True).start()
+    # The watcher now starts in _lifespan, which uvicorn.run() fires too — starting it
+    # here as well would run two watcher threads.
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8768")))

@@ -23,6 +23,7 @@ Env: HF_TOKEN (required) · PYANNOTE_MODEL (default pyannote/speaker-diarization
      KEEP_WARM · IDLE_UNLOAD_S (default 900) · RECLAIM_THRESHOLD_GB (default 2.0)
 """
 import os, sys, time, tempfile, threading, subprocess, urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Secrets live in the Mac's ~/dev/.env (R-MAC8) — load it so HF_TOKEN isn't
@@ -66,7 +67,28 @@ KEEP_WARM = os.getenv("KEEP_WARM", "false").lower() in ("1", "true", "yes")
 IDLE_UNLOAD_S = float(os.getenv("IDLE_UNLOAD_S", "180"))          # 3-min cooldown (was 900)
 RECLAIM_GB = float(os.getenv("RECLAIM_THRESHOLD_GB", "0.8"))       # reclaim after any real use (was 2.0)
 
-app = FastAPI(title="pyannote-sidecar")
+@asynccontextmanager
+async def _lifespan(app):
+    """Start the idle-unload watcher — under UVICORN, not just `python server.py`.
+
+    This used to live ONLY in the `if __name__ == "__main__"` block below. launchd runs
+    `python -m uvicorn server:app`, which IMPORTS this file (__name__ == "server"), so that
+    block never executed: the watcher thread never started and IDLE_UNLOAD_S was dead
+    config. pyannote loaded on the first diarize and then stayed resident forever — found
+    warm holding ~2 GB with the machine already swapping. A lifespan runs on BOTH paths.
+    """
+    threading.Thread(target=_idle_watch, daemon=True).start()
+    print(f"[pyannote] idle-watcher started (unload after {IDLE_UNLOAD_S}s idle, "
+          f"keep_warm={KEEP_WARM})", flush=True)
+    if KEEP_WARM and HF_TOKEN:
+        try:
+            _load()
+        except Exception as e:
+            print(f"[pyannote] warm preload failed: {e}", file=sys.stderr, flush=True)
+    yield
+
+
+app = FastAPI(title="pyannote-sidecar", lifespan=_lifespan)
 _pipeline = None
 _device = None
 _lock = threading.Lock()
@@ -169,11 +191,90 @@ def readyz():
 def agent():
     return {
         "name": "pyannote-sidecar",
+        "role": "Diarization — speaker diarization (pyannote.audio): who-spoke-when (MPS)",
         "purpose": "speaker diarization (who spoke when)",
-        "diarize": {"method": "POST /diarize",
-                    "input": "one of file=@ | path= | url=  (+ optional num_speakers|min_speakers|max_speakers)",
-                    "output": "{segments:[{start,end,speaker}], num_speakers, duration}"},
+        "summary": (
+            "Splits an audio track into speaker turns: WHO spoke WHEN. It does NOT "
+            "transcribe (pair it with the whisper sidecar) and it does NOT know anyone's "
+            "name — it returns anonymous cluster labels SPEAKER_00, SPEAKER_01, … "
+            "Also returns a voice EMBEDDING per speaker, which is how the same voice is "
+            "matched across separate files (scenes, episodes)."
+        ),
+        "auth": "none required on the LAN",
         "model": MODEL,
+        "input_modes": {
+            "file": "multipart upload of the audio/video bytes (form field `file`)",
+            "url":  "a link this sidecar downloads itself (form field `url`)",
+            "path": "absolute path to a file already on THIS Mac (no upload). A path "
+                    "that exists only on the calling machine gives 404 — upload instead.",
+            "rule": "supply EXACTLY ONE of file/url/path per request",
+            "formats": "anything ffmpeg can decode (mkv/mp4/opus/wav/…); it is converted "
+                       "to wav internally, so extracting audio first is optional — but a "
+                       "small mono 16 kHz opus uploads far faster than a multi-GB video",
+        },
+        "methods": [{
+            "name": "diarize",
+            "http": "POST /diarize",
+            "encoding": "multipart/form-data",
+            "params": {
+                "file|url|path": "the audio source (exactly one)",
+                "num_speakers": "EXACT speaker count, when you know it — most accurate",
+                "min_speakers": "lower bound when the count is unknown",
+                "max_speakers": "upper bound when the count is unknown",
+                "note": "omit all three to let the model decide; 0 is treated as unset",
+            },
+            "output": {
+                "segments": "[{start, end, speaker}] — seconds, sorted by start; one entry "
+                            "per speaker TURN, not per sentence. Turns can be adjacent and "
+                            "may overlap when people talk over each other.",
+                "num_speakers": "how many distinct speakers were found",
+                "speakers": "sorted list of the labels, e.g. ['SPEAKER_00','SPEAKER_01']",
+                "duration": "end of the last segment, seconds",
+                "embeddings": "{label: [float,…]} voice embedding per speaker. Compare with "
+                              "cosine similarity to decide whether SPEAKER_00 in file A is "
+                              "the same person as SPEAKER_03 in file B. May be {} on older "
+                              "pyannote builds — treat as optional.",
+            },
+        }],
+        "recipes": [
+            {"goal": "Who spoke when in one file",
+             "do": "POST /diarize with file=@audio.opus"},
+            {"goal": "Two-hander interview / dialogue scene",
+             "do": "POST /diarize with num_speakers=2 — pinning the count sharply improves labels"},
+            {"goal": "Unknown cast size",
+             "do": "POST /diarize with min_speakers=2 max_speakers=8 rather than leaving it open"},
+            {"goal": "Attribute an existing transcript",
+             "do": "diarize the same audio, then for each transcript cue assign the speaker "
+                   "whose segment has the greatest time OVERLAP with that cue"},
+            {"goal": "Same character across episodes",
+             "do": "diarize each episode, then cosine-match the per-speaker `embeddings` to "
+                   "link SPEAKER_xx across files; label once, reuse everywhere"},
+            {"goal": "Turn labels into character names",
+             "do": "diarization NEVER yields names. Map clusters to a cast list yourself, or "
+                   "have an LLM infer from dialogue where characters address each other"},
+        ],
+        "instructions": [
+            "1) Pick ONE input mode: upload (file), link (url), or a path on this Mac (path).",
+            "2) Constrain the speaker count if you can — num_speakers when known, else "
+            "min_speakers/max_speakers. Unconstrained runs over- or under-split more often.",
+            "3) Expect SPEAKER_xx labels, never names. Naming is a separate step.",
+            "4) To attribute a transcript, merge by maximum time overlap per cue.",
+            "5) To follow a voice across files, cosine-compare `embeddings`.",
+            "6) GET /readyz for state (cold|warm), model, hf_token and rss_gb; "
+            "POST /admin/unload to free memory now.",
+        ],
+        "limits": {
+            "concurrency": "ONE diarization at a time — the model is lock-guarded, so "
+                           "concurrent posts queue rather than run in parallel",
+            "cold_start": "the model loads on first use; a cold call pays that once",
+            "idle_unload_s": IDLE_UNLOAD_S,
+            "runtime": "roughly 0.1–0.3x realtime on MPS — budget minutes, not seconds, "
+                       "for a feature-length file",
+            "requires": "HF_TOKEN must be set (the model is gated on Hugging Face); "
+                        "GET /readyz reports hf_token true/false",
+            "not_this": "no transcription, no translation, no speaker NAMES, no "
+                        "language detection — use the whisper sidecar for text",
+        },
     }
 
 
@@ -252,10 +353,6 @@ async def diarize(
 
 
 if __name__ == "__main__":
-    threading.Thread(target=_idle_watch, daemon=True).start()
-    if KEEP_WARM and HF_TOKEN:
-        try:
-            _load()
-        except Exception as e:
-            print(f"[pyannote] warm preload failed: {e}", file=sys.stderr)
+    # The watcher + warm preload now live in _lifespan, which uvicorn.run() fires too —
+    # starting them here as well would run two watcher threads.
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8767")))

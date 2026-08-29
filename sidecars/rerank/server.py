@@ -9,6 +9,7 @@ RSS self-reclaim (empty_cache; if RSS stays > threshold, exit 42 so launchd Keep
 {SuccessfulExit:false} relaunches cold — the only reliable Metal RSS reclaim).
 """
 import os, gc, time, threading, subprocess, sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -21,7 +22,21 @@ MAX_LENGTH = int(os.environ.get("RERANK_MAX_LENGTH", "512"))
 IDLE_UNLOAD_S = int(os.environ.get("RERANK_IDLE_UNLOAD_S", "600"))
 RECLAIM_THRESHOLD_GB = float(os.environ.get("RECLAIM_THRESHOLD_GB", "1.5"))
 
-app = FastAPI(title="atelier-rerank", version="1.0")
+@asynccontextmanager
+async def _lifespan(app):
+    """Start the idle-unload watcher from the APP, not from `__main__`.
+
+    This works today only because launchd runs `python server.py`. The moment anyone
+    switches the plist to `-m uvicorn server:app` (as most sidecars here use), the module
+    is imported, `__main__` never runs, and IDLE_UNLOAD silently becomes dead config —
+    which is exactly how pyannote and audio-llm ended up resident forever. A lifespan
+    fires on both launch paths, so the timer can't be disarmed by a plist edit."""
+    threading.Thread(target=_idle_watch, daemon=True).start()
+    print(f"[rerank] idle-watcher started (unload after {IDLE_UNLOAD_S}s idle)", flush=True)
+    yield
+
+
+app = FastAPI(title="atelier-rerank", version="1.0", lifespan=_lifespan)
 _lock = threading.Lock()
 _model = None
 _last_used = time.time()
@@ -139,6 +154,7 @@ def admin_unload():
 
 
 if __name__ == "__main__":
-    threading.Thread(target=_idle_watch, daemon=True).start()
+    # Watcher now starts in _lifespan (uvicorn.run fires it too) — starting it here as
+    # well would run two watcher threads.
     print(f"[rerank] serving {MODEL_NAME} on :{PORT} device={DEVICE}", flush=True)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
