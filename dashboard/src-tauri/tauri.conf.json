@@ -5,7 +5,12 @@
   "identifier": "io.atelier.dashboard",
   "build": {
     "frontendDist": "../ui",
-    "devUrl": "http://localhost:1420"
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": {
+      "script": "python3 -m http.server 1420",
+      "cwd": "../ui",
+      "wait": false
+    }
   },
   "app": {
     "windows": [
