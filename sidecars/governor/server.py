@@ -24,6 +24,9 @@ Exposes (itself observable — no black boxes):
   POST /report          feed a completed run into the predictor
   GET  /benchmark       fire a tiny real generate → measure + record decode tok/s for a model
   GET  /predictor/stats learned per-model compute stats   ·   GET /predictor/export portable dataset
+  GET  /inventory       (h) who ACTUALLY holds memory — process RSS reconciled against every
+                            API self-report; flags anything loaded that no API admits to
+  POST /unload          (h) one door to free a specific target: <sidecar>|ollama:<m>|pid:<n>
   POST /make-room       (b) evict ONLY idle models across both tenants
   POST /force-stop      (c) human-gated two-phase yield negotiation to preempt a BUSY model
   GET  /budget          (e) global LLM memory budget + active leases + wait queue
@@ -67,6 +70,18 @@ AUTO_COOLDOWN = float(os.environ.get("ATELIER_AUTO_COOLDOWN", "60"))  # min seco
 AUTOHEAL = os.environ.get("ATELIER_AUTOHEAL", "1") not in ("0", "false", "no")
 AUTOHEAL_FLOOR_GB = float(os.environ.get("ATELIER_AUTOHEAL_FLOOR_GB", "1.5"))
 AUTOHEAL_GRACE_S = float(os.environ.get("ATELIER_AUTOHEAL_GRACE_S", "150"))
+# (i) HARD IDLE CEILING — nothing stays resident forever, warm tag or not.
+# keep_warm buys warmth DURING a work session; it is not a licence to hold GB for days.
+# Any sidecar with no call in MAX_IDLE_S gets unloaded, and kicked via launchd if the
+# unload doesn't take. The ONLY exemption is an explicit, REASONED entry in the exempt
+# file — a forgotten `KEEP_WARM=true` in a plist is not a justification, so the flag
+# alone buys nothing here. Exemptions are surfaced in /pressure and `atelier ps`, never
+# silent, so a long-lived warm model is always something someone chose and can defend.
+MAX_IDLE_ENFORCE = os.environ.get("ATELIER_MAX_IDLE_ENFORCE", "1") not in ("0", "false", "no")
+MAX_IDLE_S = float(os.environ.get("ATELIER_MAX_IDLE_S", "1800"))          # 30 minutes
+MAX_IDLE_MIN_GB = float(os.environ.get("ATELIER_MAX_IDLE_MIN_GB", "0.3"))  # ignore near-empty
+WARM_EXEMPT_FILE = Path(os.environ.get(
+    "ATELIER_WARM_EXEMPT_FILE", str(Path.home() / ".config/atelier/warm-exempt.json")))
 
 SIDECAR_BASE = {
     "omnivoice": "http://127.0.0.1:8770",
@@ -80,6 +95,7 @@ SIDECAR_BASE = {
     "maisi": "http://127.0.0.1:8775",
     "medner": "http://127.0.0.1:8131",
     "colpali": "http://127.0.0.1:8779",
+    "pronounce": "http://127.0.0.1:8782",
     "tabfm": "http://127.0.0.1:8781",
     "rerank": "http://127.0.0.1:8778",
     "pyannote": "http://127.0.0.1:8767",
@@ -91,6 +107,7 @@ SIDECAR_LOGS = {
     "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
     "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
     "whisper": Path.home() / "Library/Logs/whisper-sidecar.out.log",
+    "pronounce": Path.home() / "Library/Logs/pronounce-sidecar.out.log",
     "radiogen": Path.home() / "Library/Logs/radiogen-sidecar.out.log",
     "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
     "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
@@ -106,6 +123,7 @@ SIDECAR_LABELS = {
     "kokoro": "io.macstudio.hub.kokoro",
     "dia": "io.macstudio.hub.dia",
     "whisper": "io.macstudio.hub.whisper",
+    "pronounce": "io.macstudio.hub.pronounce",
     "llamacpp": "io.macstudio.hub.llamacpp",
     "fastmlx": "io.macstudio.hub.fastmlx",
     "mlxlm": "io.macstudio.hub.mlxlm",
@@ -150,6 +168,10 @@ _state = {
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
 _cold_heavy_since: dict = {}   # (g) name -> monotonic ts a sidecar first went cold-but-heavy
 _autoheal_log = collections.deque(maxlen=20)   # (g) recent auto-heal restarts (surfaced in /pressure)
+_maxidle_log = collections.deque(maxlen=20)    # (i) recent hard-idle-ceiling evictions
+_warm_exempt: dict = {}                        # (i) name -> {reason, owner, added}
+_warm_exempt_at = 0.0
+_warm_exempt_err: str | None = None
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
 _proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
 _internal_skip = collections.deque(maxlen=50)   # (path, ts) the governor's OWN probe fired — skip its GIN line
@@ -246,6 +268,254 @@ def _top_procs(procs: list[tuple], n: int = 8) -> list[dict]:
     return out
 
 
+# ---------- (h) HONEST INVENTORY — process ground truth vs API self-report ----------
+# The blind spot this closes: /api/ps and /readyz are SELF-REPORTS. A runner that is
+# mid-load, orphaned, or wedged holds GB of RAM while its API cheerfully says "nothing
+# loaded" — and the only symptom is the machine being full. Ground truth is the process
+# table. /inventory attributes real RSS to an owner, names the model, and states exactly
+# how to free it; anything the APIs disagree with is FLAGGED, never silently dropped.
+INVENTORY_MIN_GB = float(os.environ.get("ATELIER_INVENTORY_MIN_GB", "0.4"))
+OLLAMA_MANIFESTS = Path(os.environ.get(
+    "OLLAMA_MANIFESTS", str(Path.home() / ".ollama/models/manifests")))
+_blob_index: dict[str, str] = {}     # blob sha (hex) -> "model:tag"
+_blob_index_at = 0.0
+
+
+def _ollama_blob_index(max_age_s: float = 300.0) -> dict[str, str]:
+    """Map an Ollama blob sha → 'model:tag' by reading the manifest tree.
+
+    A running `llama-server --model .../blobs/sha256-<hex>` identifies its model ONLY by
+    content hash — useless in a status readout. This is the reverse lookup that turns that
+    hash back into a name, so an untracked runner can still be named (and killed by name).
+    Cached; the manifest tree only changes on pull/rm."""
+    global _blob_index, _blob_index_at
+    if _blob_index and time.time() - _blob_index_at < max_age_s:
+        return _blob_index
+    idx: dict[str, str] = {}
+    try:
+        for mf in OLLAMA_MANIFESTS.rglob("*"):
+            if not mf.is_file():
+                continue
+            parts = mf.relative_to(OLLAMA_MANIFESTS).parts   # <registry>/<ns>/<name>/<tag>
+            if len(parts) < 4:
+                continue
+            ns, name, tag = parts[-3], parts[-2], parts[-1]
+            label = f"{name}:{tag}" if ns == "library" else f"{ns}/{name}:{tag}"
+            try:
+                # `layers` can be absent OR explicitly null in a manifest — one bad file
+                # must not truncate the whole index (it silently did, at 5 of 25 models).
+                layers = json.loads(mf.read_text()).get("layers") or []
+                for lay in layers:
+                    if str(lay.get("mediaType", "")).endswith(".image.model"):
+                        idx[str(lay.get("digest", "")).split(":")[-1]] = label
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[governor] blob index failed: {e}", flush=True)
+    _blob_index, _blob_index_at = idx, time.time()
+    return idx
+
+
+_RUNNER_HINTS = ("llama-server", "ollama runner", "mlx_lm", "mlx-lm", "vllm",
+                 "ComfyUI", "comfy", "llama-cpp", "llama_cpp")
+
+
+def _runner_procs(procs: list[tuple]) -> list[dict]:
+    """Every process that looks like it is HOLDING A MODEL, named where possible.
+
+    Sidecar subtrees are excluded by the caller — this is for runners that belong to no
+    sidecar (Ollama's own llama-server, a hand-started mlx_lm, ComfyUI)."""
+    idx = _ollama_blob_index()
+    out = []
+    for pid, ppid, rss_kb, cmd in procs:
+        if not any(h in cmd for h in _RUNNER_HINTS):
+            continue
+        gb = round(rss_kb / 1048576, 2)
+        if gb < INVENTORY_MIN_GB:
+            continue
+        model = None
+        m = re.search(r"blobs/sha256[-:]([0-9a-f]{12,})", cmd)
+        if m:
+            model = idx.get(m.group(1)) or f"sha256:{m.group(1)[:12]}… (no manifest)"
+        elif (m2 := re.search(r"--model[= ]+(\S+)", cmd)):
+            model = m2.group(1).rsplit("/", 1)[-1]
+        port = None
+        if (m3 := re.search(r"--port[= ]+(\d+)", cmd)):
+            port = int(m3.group(1))
+        kind = ("ollama-runner" if "llama-server" in cmd or "ollama runner" in cmd
+                else "comfyui" if "omfy" in cmd else "runner")
+        out.append({"pid": pid, "ppid": ppid, "gb": gb, "kind": kind,
+                    "model": model, "port": port,
+                    "exe": cmd.split()[0].rsplit("/", 1)[-1]})
+    return out
+
+
+def _sidecar_pid(name: str, procs: list[tuple]) -> int | None:
+    base = SIDECAR_BASE.get(name, "")
+    port = base.rsplit(":", 1)[-1] if ":" in base else ""
+    for pid, _ppid, _r, cmd in procs:
+        if (port and f"--port {port}" in cmd) or f"{name}-sidecar" in cmd:
+            return pid
+    return None
+
+
+def _descendants(root_pid: int, procs: list[tuple]) -> set[int]:
+    kids: dict[int, list[int]] = {}
+    for pid, ppid, _r, _c in procs:
+        kids.setdefault(ppid, []).append(pid)
+    seen, stack = set(), [root_pid]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        stack.extend(kids.get(x, []))
+    return seen
+
+
+async def build_inventory(client: httpx.AsyncClient) -> dict:
+    """Reconcile PROCESS RSS (truth) against /api/ps + /readyz (self-report).
+
+    Every holder gets a `tracked` verdict:
+      both         — process and API agree (the healthy case)
+      process-only — RAM is held but NO API admits it  ← the invisible-model bug
+      api-only     — an API claims loaded but no process backs it (stale self-report)
+    and an `unload` field: the exact call that frees it, or null + why not."""
+    vm = read_vm()
+    procs = _proc_table()
+    holders: list[dict] = []
+    claimed_pids: set[int] = set()
+    exempt = warm_exemptions()
+
+    # ---- 1. sidecars: RSS truth vs /readyz claim ----
+    for name, base in SIDECAR_BASE.items():
+        pid = _sidecar_pid(name, procs)
+        if pid is not None:
+            claimed_pids |= _descendants(pid, procs)
+        rss = _sidecar_rss_gb(name, procs)
+        try:
+            d = (await client.get(f"{base}/readyz", timeout=3)).json()
+        except Exception:
+            d = None
+        # Framework sidecars report `lifecycle` (cold|idle|busy); bespoke ones only
+        # `state` (warm|cold) — normalise both, and never call a live sidecar unreachable.
+        state = (d or {}).get("lifecycle")
+        if state is None and d is not None:
+            state = "busy" if d.get("busy") else ("idle" if d.get("state") == "warm" else "cold")
+        state = state or "unreachable"
+        cold_rss = (d or {}).get("cold_rss_gb")
+        floor = cold_rss if cold_rss is not None else 0.3
+        claims_loaded = state in ("idle", "busy")
+        # Two different bars. "Is a model resident" is a small delta over the cold baseline —
+        # kokoro's whole model is only ~0.3 GB, so a coarse margin called it a phantom.
+        # "Is this a LEAK" needs a much bigger one: a cold sidecar's idle interpreter can sit
+        # near a GB without holding any model, and that must not raise an alarm.
+        holds_model = (rss or 0) > floor + 0.2
+        leaking = not claims_loaded and (rss or 0) > max(floor + 1.0, 1.0)
+        if not claims_loaded and (rss or 0) <= 0.5 and state != "unreachable":
+            continue                      # cold and holding nothing — not a memory holder
+        tracked = ("process-only" if leaking else
+                   "api-only" if claims_loaded and not holds_model else "both")
+        busy = state == "busy"
+        holders.append({
+            "owner": name, "tenant": "atelier", "kind": "sidecar", "pid": pid,
+            "model": (d or {}).get("model"), "gb": rss, "state": state,
+            "busy": busy, "keep_warm": bool((d or {}).get("keep_warm")),
+            "idle_s": (d or {}).get("idle_seconds", (d or {}).get("idle_s")),
+            # (i) why this one is allowed to sit warm past the ceiling — or None, meaning
+            # it isn't and the governor will evict it.
+            "exempt_reason": (exempt.get(name) or {}).get("reason"),
+            "cold_rss_gb": cold_rss, "tracked": tracked,
+            "note": (f"reports cold but holds {rss} GB — leaked or mid-load"
+                     if tracked == "process-only" else
+                     "reports loaded but RSS is at cold baseline" if tracked == "api-only" else None),
+            "unload": (None if busy else f"POST /unload {{\"target\": \"{name}\"}}"),
+            "unload_blocked": ("busy — use /force-stop (human-gated)" if busy else None),
+        })
+
+    # ---- 2. Ollama: /api/ps claim vs live llama-server runners ----
+    try:
+        ps_models = (await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)).json().get("models", [])
+    except Exception:
+        ps_models = []
+    runners = [r for r in _runner_procs(procs) if r["pid"] not in claimed_pids]
+    generating = _ollama_recently_active()
+    matched_runners: set[int] = set()
+    for m in ps_models:
+        nm = m.get("name") or ""
+        api_gb = round(m.get("size", 0) / 1e9, 2)
+        free_runners = [r for r in runners if r["pid"] not in matched_runners]
+        run = next((r for r in free_runners
+                    if r["model"] == nm or (r["model"] or "").split(":")[0] == nm.split(":")[0]),
+                   None)
+        if run is None and free_runners and api_gb:
+            # Name match failed (unresolvable blob, alias, or a manifest we can't read).
+            # An unpaired runner whose RSS is close to the API's reported size is the SAME
+            # model — pair it, or the one model is counted twice and attributed_gb exceeds
+            # actual resident memory.
+            best = min(free_runners, key=lambda r: abs(r["gb"] - api_gb))
+            if abs(best["gb"] - api_gb) <= max(2.0, 0.35 * api_gb):
+                run = best
+        if run:
+            matched_runners.add(run["pid"])
+        holders.append({
+            "owner": "ollama", "tenant": "ollama", "kind": "llm", "pid": (run or {}).get("pid"),
+            "model": nm, "gb": run["gb"] if run else round(m.get("size", 0) / 1e9, 2),
+            "api_gb": round(m.get("size", 0) / 1e9, 2),
+            "state": "busy" if generating else "idle", "busy": generating,
+            "context": m.get("context"), "expires_at": m.get("expires_at"),
+            "tracked": "both" if run else "api-only",
+            "note": None if run else "in /api/ps but no llama-server process — stale entry",
+            "unload": f"POST /unload {{\"target\": \"ollama:{nm}\"}}",
+            "unload_blocked": ("generating — unload takes effect after the current call"
+                               if generating else None),
+        })
+    # runners with NO /api/ps entry — the invisible ones. This is the case that only ever
+    # showed up as "the machine is full."
+    for r in runners:
+        if r["pid"] in matched_runners:
+            continue
+        holders.append({
+            "owner": r["kind"], "tenant": "ollama" if r["kind"] == "ollama-runner" else "unmanaged",
+            "kind": r["kind"], "pid": r["pid"], "model": r["model"], "gb": r["gb"],
+            "state": "resident", "busy": None, "tracked": "process-only",
+            "note": "HOLDS RAM BUT NO API REPORTS IT — mid-load, orphaned, or unmanaged runner",
+            "unload": f"POST /unload {{\"target\": \"pid:{r['pid']}\", \"confirm\": true}}",
+            "unload_blocked": None,
+        })
+        claimed_pids.add(r["pid"])
+
+    # ---- 3. everything else heavy — so nothing is invisible ----
+    attributed = round(sum(h["gb"] or 0 for h in holders), 1)
+    others = sorted(
+        ({"pid": p, "gb": round(rk / 1048576, 2),
+          "name": c.split()[0].rsplit("/", 1)[-1]}
+         for p, _pp, rk, c in procs
+         if p not in claimed_pids and rk / 1048576 >= max(INVENTORY_MIN_GB, 0.4)),
+        key=lambda x: x["gb"], reverse=True)[:10]
+
+    holders.sort(key=lambda h: h["gb"] or 0, reverse=True)
+    flagged = [h for h in holders if h["tracked"] != "both"]
+    return {
+        "ok": True,
+        "free_gb": vm["free_gb"], "resident_gb": vm["resident_gb"], "swapouts": vm["swapouts"],
+        "attributed_gb": attributed,
+        # Everything not attributed to a model holder: apps, the OS, kernel + the compressor.
+        # Much of it never appears in `ps`, so other_processes[] won't sum to it.
+        "other_gb": round(max(0.0, vm["resident_gb"] - attributed), 1),
+        "holders": holders,
+        "flagged": [{"owner": h["owner"], "model": h["model"], "gb": h["gb"],
+                     "tracked": h["tracked"], "note": h["note"]} for h in flagged],
+        "other_processes": others,
+        "max_idle": {"enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S,
+                     "exempt": exempt, "exempt_file": str(WARM_EXEMPT_FILE),
+                     "exempt_error": _warm_exempt_err, "recent": list(_maxidle_log)},
+        "legend": {"both": "process + API agree",
+                   "process-only": "RAM held, no API admits it",
+                   "api-only": "API claims loaded, no process backs it"},
+    }
+
+
 # ---------- async pollers ----------
 async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
@@ -270,8 +540,14 @@ async def poll_sidecar(client: httpx.AsyncClient, name: str, url: str) -> dict:
     try:
         d = (await client.get(url, timeout=3)).json()
         governed = ("reclaim_margin_gb" in d) or ("cold_rss_gb" in d)  # on the GovernedSidecar framework
+        # Framework sidecars emit `lifecycle` (cold|idle|busy). Bespoke ones (radiogen, rerank,
+        # pyannote, maisi…) only emit `state` (warm|cold) — defaulting those to "cold" reported
+        # a WARM model as unloaded, i.e. memory the governor held but never showed.
+        lifecycle = d.get("lifecycle")
+        if lifecycle is None:
+            lifecycle = "busy" if d.get("busy") else ("idle" if d.get("state") == "warm" else "cold")
         return {"tenant": "atelier", "name": name,
-                "state": d.get("lifecycle", "cold"),
+                "state": lifecycle,
                 "active_jobs": d.get("active_jobs", 0),
                 "queue_depth": d.get("queue_depth", 0),
                 # constitution surface for the dashboard:
@@ -281,6 +557,9 @@ async def poll_sidecar(client: httpx.AsyncClient, name: str, url: str) -> dict:
                 "model": d.get("model"),                         # currently-loaded model (None=cold)
                 "available_models": d.get("available_models"),   # multi-model lanes (llamacpp menu)
                 "cold_rss_gb": d.get("cold_rss_gb"),             # baseline (reclaim floor)
+                # seconds since this sidecar's last request — the input to the hard idle
+                # ceiling below. Bespoke sidecars name it differently or omit it entirely.
+                "idle_seconds": d.get("idle_seconds", d.get("idle_s")),
                 "governed": governed}                            # framework-managed vs bespoke
     except Exception:
         return {"tenant": "atelier", "name": name, "state": "unreachable"}
@@ -400,6 +679,97 @@ def _autoheal_check(tenants: list[dict]) -> None:
             print(f"[governor] AUTOHEAL kickstart {name} failed: {e}", flush=True)
 
 
+def warm_exemptions(max_age_s: float = 30.0) -> dict:
+    """(i) The registry of LEGITIMATE long-warm cases: name -> {reason, owner, added}.
+
+    This is the honest half of the ceiling. There are real reasons to hold a model past
+    30 idle minutes (an ASR sidecar fronting an interactive lesson, a TTS engine mid-
+    podcast-run), and this is where such a case gets WRITTEN DOWN — with a reason, an
+    owner, and a date — instead of hiding behind a plist flag nobody remembers setting.
+
+    A `reason` is MANDATORY. An entry without a non-empty reason is ignored and reported
+    as invalid: "someone set a flag" is exactly the state this is meant to eliminate."""
+    global _warm_exempt, _warm_exempt_at, _warm_exempt_err
+    if _warm_exempt and time.time() - _warm_exempt_at < max_age_s:
+        return _warm_exempt
+    out, err = {}, None
+    try:
+        if WARM_EXEMPT_FILE.exists():
+            raw = json.loads(WARM_EXEMPT_FILE.read_text())
+            for name, v in (raw or {}).items():
+                if name.startswith("_"):
+                    continue          # _comment / _example — documentation, not an exemption
+                if isinstance(v, str):
+                    v = {"reason": v}
+                reason = (v or {}).get("reason", "").strip()
+                if not reason:
+                    err = f"{name}: no reason given — exemption ignored"
+                    continue
+                out[name] = {"reason": reason, "owner": (v or {}).get("owner"),
+                             "added": (v or {}).get("added"),
+                             "expires": (v or {}).get("expires")}
+    except Exception as e:
+        err = f"unreadable {WARM_EXEMPT_FILE}: {e}"
+    _warm_exempt, _warm_exempt_at, _warm_exempt_err = out, time.time(), err
+    return out
+
+
+async def _max_idle_check(client: httpx.AsyncClient, tenants: list[dict]) -> None:
+    """(i) Enforce the hard idle ceiling. Unload any atelier sidecar idle past MAX_IDLE_S
+    REGARDLESS of its keep_warm tag; if the unload doesn't take, kick it via launchd.
+
+    Never touches a busy sidecar or one with callers queued — the ceiling is about
+    abandoned residency, not preemption."""
+    if not MAX_IDLE_ENFORCE:
+        return
+    exempt = warm_exemptions()
+    for t in tenants:
+        if t.get("tenant") != "atelier" or t.get("state") != "idle":
+            continue
+        if t.get("busy") or (t.get("active_jobs") or 0) > 0 or (t.get("queue_depth") or 0) > 0:
+            continue
+        name = t.get("name")
+        idle_s = t.get("idle_seconds")
+        mem = t.get("mem_gb") or 0.0
+        if idle_s is None:
+            # A sidecar that won't say when it was last used can't be judged on idleness.
+            # Flag it rather than guess — silence is not consent to keep the RAM.
+            t["max_idle"] = "unknown (sidecar reports no idle_seconds)"
+            continue
+        if idle_s <= MAX_IDLE_S or mem < MAX_IDLE_MIN_GB:
+            continue
+        if name in exempt:
+            t["max_idle"] = "exempt"
+            t["exempt_reason"] = exempt[name]["reason"]
+            continue
+        acted, how = False, None
+        try:
+            base = SIDECAR_BASE.get(name)
+            r = (await client.post(f"{base}/admin/unload", timeout=15)).json()
+            if r.get("refused") == "busy":
+                continue                       # raced with a new job — leave it alone
+            acted, how = True, "admin/unload"
+        except Exception as e:
+            how = f"unload failed ({e})"
+        if not acted:
+            # "switched off OR kicked" — a sidecar with no working unload still gets freed.
+            label = SIDECAR_LABELS.get(name)
+            if label:
+                try:
+                    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                                   check=True, capture_output=True, timeout=15)
+                    acted, how = True, f"kickstart -k ({how})"
+                except Exception as e:
+                    how = f"{how}; kickstart failed ({e})"
+        print(f"[governor] MAX-IDLE {'evicted' if acted else 'FAILED on'} {name}: "
+              f"idle {int(idle_s)}s > {int(MAX_IDLE_S)}s ceiling, held {mem}GB "
+              f"(keep_warm={t.get('keep_warm')}) — {how}", flush=True)
+        _maxidle_log.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "name": name,
+                             "idle_s": int(idle_s), "held_gb": mem,
+                             "keep_warm": bool(t.get("keep_warm")),
+                             "action": how, "ok": acted})
+
+
 async def _poller():
     async with httpx.AsyncClient() as client:
         while True:
@@ -426,6 +796,7 @@ async def _poller():
                     if t.get("mem_gb") is None:
                         t["mem_gb"] = 0.0
                 _autoheal_check(tenants)   # constitution enforced from OUTSIDE: cold-but-heavy → restart
+                await _max_idle_check(client, tenants)   # (i) hard 30-min idle ceiling, warm tag or not
                 # heaviest resident first, top-down (cold sidecars → mem 0 → sink to the bottom)
                 tenants.sort(key=lambda t: t.get("mem_gb") or 0.0, reverse=True)
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
@@ -457,11 +828,20 @@ async def _poller():
                     "budget_gb": effective_budget,      # live LLM ceiling after subtracting baseline
                     "top_procs": _top_procs(procs, 8),  # where the resident memory actually is
                     "autoheal": list(_autoheal_log),    # (g) recent Law-1 auto-restarts
+                    "max_idle": {                       # (i) the hard idle ceiling + who is excused from it
+                        "enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S,
+                        "exempt": warm_exemptions(),    # each with a WRITTEN reason, or it doesn't count
+                        "exempt_file": str(WARM_EXEMPT_FILE),
+                        "exempt_error": _warm_exempt_err,
+                        "recent": list(_maxidle_log),
+                    },
                     "constitution": {                   # the Atelier framework, surfaced for the dashboard
                         "laws": ["no memory leaks", "never unload an actively-working model",
-                                 "queue calls under pressure"],
+                                 "queue calls under pressure",
+                                 "nothing stays resident past the idle ceiling without a written reason"],
                         "autoheal": {"enabled": AUTOHEAL, "floor_gb": AUTOHEAL_FLOOR_GB,
                                      "grace_s": AUTOHEAL_GRACE_S},
+                        "max_idle": {"enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S},
                         "cliff_gb": CLIFF_GB, "warn_gb": WARN_GB},
                 })
             except Exception as e:
@@ -881,6 +1261,7 @@ SIDECAR_ROLES = {
     "kokoro": "TTS — fast, fixed voices (fallback)",
     "dia": "TTS — expressive voice cloning (batch)",
     "whisper": "ASR — speech-to-text, + optional LLM structure/summarize",
+    "pronounce": "Pronunciation scoring — espeak-ng IPA + CUPE-2i phonemes, reference-based (Italian)",
     "llamacpp": "LLM — llama.cpp/llama-server (Metal, GGUF), OpenAI-compatible",
     "fastmlx": "LLM/VLM — FastMLX (MLX-native), OpenAI-compatible [blocked: upstream]",
     "mlxlm": "LLM — Apple mlx_lm.server (MLX-native), OpenAI-compatible",
@@ -892,7 +1273,7 @@ SIDECAR_ROLES = {
     "audio-llm": "Audio understanding — classify/describe an audio track (multi-model: Qwen2-Audio/Voxtral/Qwen3-Omni, MLX)",
 }
 AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner",
-                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm"}
+                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm", "pronounce"}
 
 # Present on the box but NOT governed sidecars (no admit/unload contract). Surfaced in /agent so
 # an agent has the COMPLETE picture — but the governor CANNOT admit/evict these; their memory sits
@@ -1003,6 +1384,9 @@ async def agent(expand: bool = False):
             "POST /report": "feed a completed run into the predictor",
             "POST /llm/{backend}/{path}": "capturing proxy — the recommended way to run LLMs",
             "POST /admit · POST /release": "manual memory lease (the proxy does this for you)",
+            "GET /inventory": "who ACTUALLY holds memory — process RSS vs API self-report, "
+                              "with the exact unload call per holder; flags what no API admits",
+            "POST /unload": "free one target: {target: '<sidecar>'|'ollama:<model>'|'pid:<n>'}",
             "POST /make-room": "evict ONLY idle models to free memory",
             "POST /force-stop": "human-gated preempt of a BUSY model",
         },
@@ -1400,6 +1784,92 @@ async def force_stop(req: ForceStopReq):
                 "before_gb": before, "after_gb": after, "freed_gb": round((after or 0) - (before or 0), 1),
                 "reached": (after >= req.need_gb) if req.need_gb else None,
                 "result": result}
+
+
+# ========== (h) inventory + the single unload door ==========
+@app.get("/inventory")
+async def inventory():
+    """WHO IS ACTUALLY HOLDING MEMORY — process truth reconciled against every API claim.
+    Read this instead of guessing from free_gb. `flagged` is the honest part: anything the
+    self-reports got wrong."""
+    async with httpx.AsyncClient() as client:
+        return await build_inventory(client)
+
+
+class UnloadReq(BaseModel):
+    target: str = ""       # "<sidecar>" | "ollama:<model>" | "pid:<n>"
+    force: bool = False    # sidecar only: preempt a BUSY model (framework refuses otherwise)
+    confirm: bool = False  # required for pid: — killing a process is not reversible
+
+
+@app.post("/unload")
+async def unload(req: UnloadReq):
+    """ONE door to free a specific thing, whatever holds it. Idle targets need nothing;
+    a BUSY sidecar needs force=true (prefer /force-stop's human-gated handshake); a raw
+    pid needs confirm=true because there is no graceful protocol for an orphan."""
+    if not req.target:
+        return {"ok": False, "error": "target required — <sidecar> | ollama:<model> | pid:<n>",
+                "hint": "GET /inventory lists every target with its exact unload call"}
+    before = read_vm()["free_gb"]
+    result: dict = {}
+
+    if req.target.startswith("pid:"):
+        try:
+            pid = int(req.target.split(":", 1)[1])
+        except ValueError:
+            return {"ok": False, "error": f"bad pid in '{req.target}'"}
+        procs = _proc_table()
+        row = next((p for p in procs if p[0] == pid), None)
+        if not row:
+            return {"ok": False, "error": f"pid {pid} not running"}
+        cmd, gb = row[3], round(row[2] / 1048576, 2)
+        if not any(h in cmd for h in _RUNNER_HINTS):
+            return {"ok": False, "error": f"pid {pid} is not a model runner — refusing",
+                    "process": cmd.split()[0], "note": "only model-holding processes are killable here"}
+        if not req.confirm:
+            return {"ok": True, "phase": "preview", "pid": pid, "gb": gb,
+                    "process": cmd[:160],
+                    "effect": "SIGTERM — no in-flight request is drained first",
+                    "next": f're-POST with {{"target": "pid:{pid}", "confirm": true}}'}
+        try:
+            os.kill(pid, 15)
+            result = {"method": "SIGTERM", "pid": pid, "gb_held": gb}
+        except Exception as e:
+            return {"ok": False, "error": f"kill {pid} failed: {e}"}
+
+    elif req.target.startswith("ollama:"):
+        model = req.target.split(":", 1)[1]
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(f"{OLLAMA_URL}/api/generate",
+                                  json={"model": model, "keep_alive": 0}, timeout=20)
+            except Exception as e:
+                return {"ok": False, "error": f"ollama unload {model} failed: {e}"}
+        result = {"method": "keep_alive=0", "model": model,
+                  "note": "frees after the current request returns"}
+
+    elif req.target in SIDECAR_BASE:
+        base = SIDECAR_BASE[req.target]
+        params = {"force": "true"} if req.force else {}
+        async with httpx.AsyncClient() as client:
+            try:
+                r = (await client.post(f"{base}/admin/unload", params=params, timeout=15)).json()
+            except Exception as e:
+                return {"ok": False, "error": f"{req.target} unload failed: {e}",
+                        "hint": "sidecar may have no /admin/unload — check GET /inventory"}
+        if r.get("refused") == "busy":
+            return {"ok": False, "refused": "busy", "target": req.target, "sidecar_result": r,
+                    "hint": "pass force=true, or use /force-stop for the human-gated handshake"}
+        result = {"method": "/admin/unload" + ("?force=true" if req.force else ""),
+                  "sidecar_result": r}
+    else:
+        return {"ok": False, "error": f"unknown target '{req.target}'",
+                "known": sorted(SIDECAR_BASE) + ["ollama:<model>", "pid:<n>"]}
+
+    await asyncio.sleep(1.5)   # let macOS reclaim before re-reading
+    after = read_vm()["free_gb"]
+    return {"ok": True, "target": req.target, "before_gb": before, "after_gb": after,
+            "freed_gb": round(after - before, 1), "result": result}
 
 
 # ========== LLM admission gate — the request-path queue (docs/LLM_ADMISSION_QUEUE.md) ==========
