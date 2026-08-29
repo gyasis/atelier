@@ -645,6 +645,24 @@ def _suggest(low: bool, normalized: bool, gained: bool) -> str | None:
     return "still low after normalize+gain — try model=large, or the audio may be too degraded / non-speech"
 
 
+def _finite(xs: list) -> list:
+    """Keep only real numbers. NaN/Inf are NOT None, so an `is not None` guard lets
+    them through statistics.mean() and straight into json.dumps(), which raises
+    ValueError: Out of range float values are not JSON compliant: nan."""
+    return [x for x in xs if isinstance(x, (int, float)) and math.isfinite(x)]
+
+
+def _json_safe(o):
+    """Normalize non-finite floats to None anywhere in a response body."""
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _json_safe(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_json_safe(v) for v in o]
+    return o
+
+
 def _quality(result: dict, *, normalized: bool, gained: bool) -> dict:
     segs = result.get("segments", [])
     if not segs:
@@ -653,16 +671,17 @@ def _quality(result: dict, *, normalized: bool, gained: bool) -> dict:
                 "avg_logprob": None, "min_logprob": None,
                 "max_no_speech_prob": None, "max_compression_ratio": None,
                 "suggestion": _suggest(True, normalized, gained)}
-    logs = [s["avg_logprob"] for s in segs if s.get("avg_logprob") is not None]
-    nsp = [s["no_speech_prob"] for s in segs if s.get("no_speech_prob") is not None]
-    crs = [s["compression_ratio"] for s in segs if s.get("compression_ratio") is not None]
+    logs = _finite([s.get("avg_logprob") for s in segs])
+    nsp = _finite([s.get("no_speech_prob") for s in segs])
+    crs = _finite([s.get("compression_ratio") for s in segs])
     avg_logprob = round(statistics.mean(logs), 3) if logs else None
     min_logprob = round(min(logs), 3) if logs else None
     max_nsp = round(max(nsp), 3) if nsp else None
     max_cr = round(max(crs), 3) if crs else None
     # Text density catches the "Thank you."/empty hallucination on noisy/near-silent
     # audio — those look confident by logprob but drop almost all the speech.
-    audio_s = (segs[-1].get("end") or 0.0)
+    _end = segs[-1].get("end")
+    audio_s = _end if isinstance(_end, (int, float)) and math.isfinite(_end) else 0.0
     chars = len(result.get("text", "").strip())
     density = round(chars / audio_s, 2) if audio_s > 0 else 0.0
     reasons = []
@@ -990,7 +1009,7 @@ async def transcribe(
         body.update(await _postprocess(result, structure, summarize, llm_model))
 
     if isinstance(body, (dict, list)):
-        return JSONResponse(content=body, headers=headers)
+        return JSONResponse(content=_json_safe(body), headers=headers)
     return PlainTextResponse(content=body, media_type=media_type, headers=headers)
 
 
