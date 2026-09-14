@@ -1150,7 +1150,32 @@ async def _ollama_stats_watcher():
                         models = ps.json().get("models", [])
                         if not models:
                             continue
-                        model_name = models[0].get("name", "")
+                        # Probe the model that was actually CALLED — never models[0], which
+                        # with several loaded could be an idle one nobody is using, and the
+                        # probe would reset its idle timer. No name on the call → only probe
+                        # when exactly one model is loaded (unambiguous); otherwise skip.
+                        called = str(latest.get("model") or "")
+                        if called:
+                            target = next((mm for mm in models if called in
+                                           (mm.get("name"), mm.get("model"))), None)
+                        else:
+                            target = models[0] if len(models) == 1 else None
+                        if not target:
+                            continue
+                        model_name = target.get("name", "")
+                        # Idle policy (2026-09-14): a model stays warm OLLAMA_KEEP_ALIVE (120 s)
+                        # after its last REAL request, and no probe may extend that. Ollama resets
+                        # the expiry on every request, so pass keep_alive = the time the model has
+                        # LEFT; skip entirely if it is about to expire (a probe must not reload it).
+                        try:
+                            from datetime import datetime   # not imported at module level here
+                            _exp = re.sub(r"(\.\d{6})\d+", r"\1", str(target.get("expires_at") or ""))
+                            _left = datetime.fromisoformat(_exp).timestamp() - time.time()
+                        except Exception:
+                            _left = 0.0
+                        if _left < 10:
+                            continue
+                        probe_keep_alive = f"{int(_left)}s"
                         # Fire a tiny probe (8 tokens) for fresh eval stats. Do NOT pass
                         # keep_alive — the probe must never EXTEND a model's life (policy: don't
                         # keep things warm; fade out and reclaim on demand). It inherits the
@@ -1158,6 +1183,7 @@ async def _ollama_stats_watcher():
                         # expires on the normal short timer instead of being pinned by benchmarking.
                         probe = await client.post(f"{OLLAMA_URL}/api/generate",
                             json={"model": model_name, "prompt": "Hi", "stream": False,
+                                  "keep_alive": probe_keep_alive,
                                   "options": {"num_predict": 8}},
                             timeout=30)
                         # Record the probe as a LABELED, visible entry (so the dashboard shows

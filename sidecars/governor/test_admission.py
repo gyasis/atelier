@@ -175,6 +175,49 @@ def test_route_auto_unknown_model_defaults_ollama():
     print("✓ auto falls back to ollama for an uncatalogued model")
 
 
+def _warm_gate(loaded_name="big:q4"):
+    """The 2026-09-14 per-call-reload shape: one big model loaded but IDLE, its memory
+    counted by the poller as untracked, and too little budget left for a second copy."""
+    g = gate(budget_gb=30.0)
+    g.set_untracked_gb(26.0)
+    g.set_loaded({("ollama", loaded_name)})
+    return g
+
+
+def test_idle_loaded_model_is_reused_not_queued():
+    g = _warm_gate()
+    d = run(g.admit("j1", "big:q4", est_gb=23.0))
+    assert d.grant and d.reused and d.reserved_gb == 23.0, d
+    other = run(g.admit("j2", "other:q4", est_gb=23.0))   # a DIFFERENT model still doesn't fit
+    assert not other.grant, other
+    print("✓ idle loaded model is reused instead of waiting for it to unload")
+
+
+def test_busy_single_slot_model_still_queues():
+    g = _warm_gate()
+    assert run(g.admit("j1", "big:q4", est_gb=23.0)).grant
+    d2 = run(g.admit("j2", "big:q4", est_gb=23.0))        # num_parallel=1, slot taken
+    assert not d2.grant, d2
+    print("✓ a busy single-slot model still queues the next request")
+
+
+def test_idle_reuse_does_not_jump_queue():
+    g = _warm_gate()
+    q = run(g.admit("waiting", "other:q4", est_gb=23.0))  # head, needs the idle model evicted
+    assert not q.grant
+    d = run(g.admit("j1", "big:q4", est_gb=23.0))
+    assert not d.grant, "reuse must not starve a job waiting for this model's eviction"
+    print("✓ idle reuse does not jump a queued job")
+
+
+def test_reuse_needs_exact_model_name():
+    g = _warm_gate("qwen3:1.7b")
+    assert not run(g.admit("j", "qwen3", est_gb=23.0)).grant, "substring is not a match"
+    g2 = _warm_gate("phi4-mini:latest")
+    assert run(g2.admit("j", "phi4-mini", est_gb=23.0)).grant, ":latest is the same model"
+    print("✓ reuse matches exact model names (bare name == :latest)")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
