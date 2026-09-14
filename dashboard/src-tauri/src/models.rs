@@ -117,6 +117,25 @@ pub struct RecentCall {
     pub via: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// The assistant's reply text. Without this field declared here, `get_telemetry`
+    /// re-serializes RecentCall and drops it, so the task-detail modal would show an
+    /// empty output pane no matter what the governor captured.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// Client IP from the ollama access log — distinguishes a call the user made here
+    /// from one the LAN gateway made straight to :11434.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// Why a row has no prompt/output, in plain words, instead of leaving the user to guess.
+    #[serde(default)]
+    pub capture_note: Option<String>,
+    /// Who ran the call ("wuphf/researcher · task-1841") — the join key back to the
+    /// caller's own logs, so a row can be matched to an agent without eyeballing clocks.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Structured form of the same (agent / task / session / trace ids).
+    #[serde(default)]
+    pub origin_detail: Option<serde_json::Value>,
     #[serde(default)]
     pub in_tok: Option<u64>,
     #[serde(default)]
