@@ -39,6 +39,7 @@ import collections
 import json
 import os
 import re
+import socket
 import sqlite3
 import statistics
 import secrets
@@ -175,6 +176,9 @@ _warm_exempt_err: str | None = None
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
 _proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
 _internal_skip = collections.deque(maxlen=50)   # (path, ts) the governor's OWN probe fired — skip its GIN line
+# How long after a probe marker a matching GIN line is still considered "ours". Must exceed
+# a cold model load, or the probe's own log line is mistaken for user traffic.
+PROBE_SKIP_WINDOW_S = float(os.environ.get("ATELIER_PROBE_SKIP_WINDOW_S", "90"))
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
 # Durable task history — survives governor restarts (the in-memory deques alone
 # cleared on every restart, so Ollama tasks vanished from the dashboard).
@@ -912,7 +916,7 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
     await gate.reap(now)
 
 # ---------- Ollama log tailer ----------
-_GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*\S+\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
+_GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*(?P<client>\S+)\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
 _OFFLOAD = re.compile(r'layers\.model=(?P<model>\d+).*?layers\.offload=(?P<offload>\d+)')
 _EVICT = re.compile(r'msg="?(expired event received|stopping llama server)')
 _RUNNER = re.compile(r'llama runner started in (?P<sec>[\d.]+) seconds')
@@ -933,9 +937,19 @@ def parse_log_line(line: str):
                 ts = time.time()
         except Exception:
             ts = time.time()
+        # WHO made the call. A GIN line always carried the client IP and we threw it away,
+        # so a call from the LAN gateway was indistinguishable from one the user made here —
+        # and both showed an empty prompt/output, since a direct :11434 call never passes
+        # through the capturing proxy. Naming the client turns "why is this blank?" into
+        # "that came from a LAN host, which bypasses the governor."
+        client = m.group("client")
         entry = {"at": log_time, "ts": ts,
                  "status": m.group("status"), "latency": m.group("lat"),
-                 "path": m.group("path")}
+                 "path": m.group("path"), "client": client,
+                 "via": "direct-to-ollama",
+                 "capture_note": (f"called ollama directly on :11434 from {client} — the governor "
+                                  "only sees the access-log line (timing), so the prompt and reply "
+                                  "were never captured. Route via POST /llm/ollama/... to record them.")}
         # Attach latest perf stats (model name + tok/s) if available
         if _ollama_last_stats:
             entry.update(_ollama_last_stats)
@@ -949,7 +963,9 @@ def parse_log_line(line: str):
         # The governor's OWN benchmark probe is an /api/generate — recorded separately and
         # labeled. Skip its raw GIN line so it can't masquerade as user traffic (and can't
         # re-trigger the stats watcher into a self-perpetuating probe loop).
-        if any(p == m.group("path") and abs(pts - ts) < 3.0 for p, pts in _internal_skip):
+        # Window must cover a COLD model load (30B ≈ 5s, larger ones far more), otherwise
+        # a slow probe's log line slips past the guard and restarts the feedback loop.
+        if any(p == m.group("path") and abs(pts - ts) < PROBE_SKIP_WINDOW_S for p, pts in _internal_skip):
             return
         _recent_calls.append(entry)
         return
@@ -1129,6 +1145,12 @@ async def _ollama_stats_watcher():
     # already seen (incl. our own probe) after probing.
     PROBE_COOLDOWN = float(os.environ.get("ATELIER_PROBE_COOLDOWN", "60"))
     last_probe_ts = 0.0
+    # Models that answered "does not support generate" — embedding models (bge-m3,
+    # nomic-embed…) are a hard no for /api/generate. Without this the watcher re-probed
+    # one every COOLDOWN seconds forever: an embedding call counts as a "real call", so
+    # a codebase indexer doing thousands of them kept the loop permanently armed. Left
+    # unfixed it was ~1400 failed 400s a day, all of them landing in the task stream.
+    no_generate: set = set()
     async with httpx.AsyncClient() as client:
         while True:
             await asyncio.sleep(0.5)
@@ -1181,21 +1203,55 @@ async def _ollama_stats_watcher():
                         # keep things warm; fade out and reclaim on demand). It inherits the
                         # global OLLAMA_KEEP_ALIVE, same as the real call it follows, so the model
                         # expires on the normal short timer instead of being pinned by benchmarking.
+                        # Mark the skip BEFORE firing. ollama writes its GIN line the moment
+                        # the response is sent, and the tailer can read it while this coroutine
+                        # is still awaiting — so a marker appended AFTER the call arrived too
+                        # late, the probe's own log line was ingested as user traffic, and it
+                        # re-triggered this watcher on the next tick. That loop reloaded a 30B
+                        # model every ~5 minutes forever and buried the task stream in 39
+                        # self-probes out of 50 entries.
+                        if model_name in no_generate:
+                            continue          # embedding-only: benchmarking it is meaningless
+                        _probe_started = time.time()
+                        _internal_skip.append(("/api/generate", _probe_started))
                         probe = await client.post(f"{OLLAMA_URL}/api/generate",
                             json={"model": model_name, "prompt": "Hi", "stream": False,
                                   "keep_alive": probe_keep_alive,
                                   "options": {"num_predict": 8}},
                             timeout=30)
                         # Record the probe as a LABELED, visible entry (so the dashboard shows
-                        # exactly what the governor is doing) AND mark its GIN line to be skipped.
+                        # exactly what the governor is doing) AND re-mark its GIN line: a cold
+                        # 30B load can take 30s+, so the completion timestamp may sit far outside
+                        # the match window around the start marker.
                         _now = time.time()
+                        _internal_skip.append(("/api/generate", _now))
+                        _probe_out, _probe_tok = "", None
+                        try:
+                            _pj = probe.json()
+                            _probe_out = _extract_output(_pj)
+                            _probe_tok = _pj.get("eval_count")
+                            if probe.status_code >= 400:
+                                _err = str(_pj.get("error") or _pj)[:300]
+                                _probe_out = f"▲ probe failed ({probe.status_code}): {_err}"
+                                if "does not support generate" in _err:
+                                    no_generate.add(model_name)
+                                    print(f"[governor] {model_name} does not support generate — "
+                                          f"will not benchmark it again", flush=True)
+                        except Exception:
+                            pass
                         _recent_calls.append({
-                            "at": time.strftime("%H:%M:%S"), "ts": _now, "status": "200",
-                            "latency": "—", "path": "/api/generate", "model": model_name,
+                            # the real status: hardcoding 200 made a failing probe look healthy
+                            "at": time.strftime("%H:%M:%S"), "ts": _now,
+                            "status": str(probe.status_code),
+                            "latency": f"{_now - _probe_started:.2f}s",
+                            "path": "/api/generate", "model": model_name,
                             "backend": "ollama", "via": "governor-probe",
                             "prompt": f"▣ governor warm-up/benchmark probe for {model_name} (num_predict=8)",
+                            # record what came back, so opening this row shows something real
+                            # instead of an empty pane
+                            "output": _probe_out or "(no text — probe capped at 8 tokens)",
+                            "eval_tokens": _probe_tok,
                         })
-                        _internal_skip.append(("/api/generate", _now))
                         if probe.status_code == 200:
                             d = probe.json()
                             ec = d.get("eval_count", 0)
@@ -1252,11 +1308,100 @@ async def _history_saver():
         await asyncio.sleep(15)
         _save_history()
 
+_intercept_started = False   # guard: only the primary lifespan may open the second socket
+
+
+async def _serve_intercept_port():
+    """(j) TRANSPARENT CAPTURE — also answer on ollama's own port.
+
+    Opt-in capture never finishes the job: every client that only exposes a "base URL"
+    (Cline, LiteLLM, anything embedding-based) keeps finding its way back to :11434, and
+    ollama's logs cannot recover a bypassed call — even at --log-verbosity 4 they record
+    token COUNTS, never prompt text. The only way to be sure is to BE the port.
+
+    Ollama moves to 127.0.0.1:11435 (loopback-only) and the governor answers on 11434,
+    so a call is captured whether or not the client cooperates. Same app, same state,
+    second socket — the drop-in /api/* and /v1/* routes already speak ollama's dialect.
+
+    Binds nothing unless ATELIER_INTERCEPT_PORT is set, and a bind failure is logged
+    loudly but never fatal: losing the governor must not also take down the hub."""
+    port = int(os.environ.get("ATELIER_INTERCEPT_PORT", "0"))
+    if not port:
+        return
+    host = os.environ.get("ATELIER_INTERCEPT_HOST", "0.0.0.0")
+    # Self-loop check compares the FULL address, not just the port. Sharing a port number
+    # with ollama is the normal case here: ollama binds 127.0.0.1:11434 (Expose off) while
+    # we bind the LAN address on the same port, so LAN clients reach us and loopback
+    # reaches ollama. Only an identical host AND port would proxy to itself.
+    from urllib.parse import urlparse
+    up = urlparse(OLLAMA_URL)
+    up_host = (up.hostname or "").replace("localhost", "127.0.0.1")
+    up_port = up.port or 11434
+    if up_port == port and (up_host == host or host == "0.0.0.0"):
+        print(f"[governor] INTERCEPT ABORTED: upstream {OLLAMA_URL} is the same address as "
+              f"{host}:{port} — that would proxy to itself. Bind the LAN address "
+              f"(ATELIER_INTERCEPT_HOST) or move ollama to another port.", flush=True)
+        return
+    global _intercept_started
+    if _intercept_started:
+        return
+    _intercept_started = True
+    import uvicorn
+    # lifespan="off" is REQUIRED, not tidiness: serving the same `app` object runs its
+    # lifespan again, which starts another intercept listener, which serves the app
+    # again — an infinite recursion that spawned servers until the port bind failed.
+    # The primary listener already owns startup; this socket only needs to serve.
+    cfg = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="off")
+    server = uvicorn.Server(cfg)
+    server.install_signal_handlers = lambda: None    # secondary server: parent owns signals
+    # Bind the socket OURSELVES and hand it to uvicorn. Two reasons, both learned the
+    # hard way: (1) uvicorn logs a bind failure and calls sys.exit, raising SystemExit —
+    # a BaseException that `except OSError` never sees, so the retry silently died;
+    # (2) serve() binds internally, so anything printed before it announces success that
+    # has not happened yet. Owning the socket makes "active" mean actually listening.
+    retry_s = float(os.environ.get("ATELIER_INTERCEPT_RETRY_S", "30"))
+    announced_wait = False
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            sock.listen(2048)
+            sock.setblocking(False)
+        except OSError as e:
+            sock.close()
+            if not announced_wait:
+                print(f"[governor] intercept cannot bind {host}:{port} yet ({e}). Ollama "
+                      f"still holds it — turn OFF 'Expose Ollama to the network' in "
+                      f"Ollama.app so it binds 127.0.0.1 only. Retrying every "
+                      f"{int(retry_s)}s; the governor keeps working on its own port.",
+                      flush=True)
+                announced_wait = True
+            await asyncio.sleep(retry_s)
+            continue
+        try:
+            print(f"[governor] TRANSPARENT INTERCEPT listening on {host}:{port} → "
+                  f"upstream {OLLAMA_URL} (LAN clients are now captured)", flush=True)
+            await server.serve(sockets=[sock])
+            return
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:          # SystemExit included — never kill the governor
+            print(f"[governor] intercept listener stopped: {e!r}", flush=True)
+            return
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_history()   # restore task history BEFORE the log tailer adds live ones
     tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer()),
-             asyncio.create_task(_ollama_stats_watcher()), asyncio.create_task(_history_saver())]
+             asyncio.create_task(_ollama_stats_watcher()), asyncio.create_task(_history_saver()),
+             asyncio.create_task(_serve_intercept_port())]
     for nm, p in SIDECAR_LOGS.items():
         tasks.append(asyncio.create_task(_tail_sidecar(nm, p)))
     yield
@@ -1898,6 +2043,79 @@ async def unload(req: UnloadReq):
             "freed_gb": round(after - before, 1), "result": result}
 
 
+class IngestCall(BaseModel):
+    """One LLM call that never touched this box — report it so the stream is complete."""
+    model: str = ""
+    backend: str = "external"        # e.g. "ollama-cloud", "openai", "anthropic"
+    origin: str = ""                 # who ran it: "wuphf/researcher · task-1841"
+    prompt: str = ""
+    output: str = ""
+    status: int = 200
+    latency_s: float | None = None
+    in_tok: int | None = None
+    out_tok: int | None = None
+    ts: float | None = None          # unix seconds; defaults to now
+    detail: dict | None = None       # anything else worth keeping (agent, task, trace…)
+
+
+@app.post("/telemetry/ingest")
+async def telemetry_ingest(req: IngestCall):
+    """Record a call the governor could not see.
+
+    The office's frontier models run on Ollama Cloud, so those calls never reach this
+    machine and can never appear in the task stream — which makes the stream a partial
+    record and leaves cloud spend invisible next to local. Reporting them here puts local
+    and cloud in ONE searchable place with the same shape, joined by `origin`.
+
+    Marked via="reported" so a self-declared record is never mistaken for one the
+    governor observed itself."""
+    ts = req.ts or time.time()
+    entry = {
+        "at": time.strftime("%H:%M:%S", time.localtime(ts)), "ts": ts,
+        "status": str(req.status),
+        "latency": f"{req.latency_s:.2f}s" if req.latency_s is not None else "—",
+        "path": "/external", "model": req.model or "?", "backend": req.backend,
+        "via": "reported",
+        "prompt": _clip(req.prompt), "output": _clip(req.output),
+        "in_tok": req.in_tok, "eval_tokens": req.out_tok,
+        "origin": (req.origin or _origin_label(req.detail or {}) or None),
+        "origin_detail": req.detail or None,
+        "capture_note": None,
+    }
+    _recent_calls.append(entry)
+    return {"ok": True, "recorded": {"model": entry["model"], "origin": entry["origin"],
+                                     "prompt_chars": len(entry["prompt"] or ""),
+                                     "output_chars": len(entry["output"] or "")}}
+
+
+@app.get("/telemetry/search")
+async def telemetry_search(q: str = "", origin: str = "", model: str = "",
+                           via: str = "", limit: int = 50):
+    """Search the task stream. Substring, case-insensitive, across prompt/output/model/origin.
+
+    The stream holds a rolling window of calls; scrolling it by eye to find "what did the
+    researcher agent ask at 14:05" does not scale past a handful of rows."""
+    ql, ol, ml, vl = q.lower(), origin.lower(), model.lower(), via.lower()
+    out = []
+    for c in reversed(_recent_calls):
+        if ol and ol not in str(c.get("origin") or "").lower():
+            continue
+        if ml and ml not in str(c.get("model") or "").lower():
+            continue
+        if vl and vl not in str(c.get("via") or "").lower():
+            continue
+        if ql:
+            hay = " ".join(str(c.get(k) or "") for k in
+                           ("prompt", "output", "model", "origin", "backend", "client", "path"))
+            if ql not in hay.lower():
+                continue
+        out.append(c)
+        if len(out) >= max(1, min(limit, 200)):
+            break
+    return {"ok": True, "count": len(out), "query": {"q": q, "origin": origin,
+            "model": model, "via": via}, "calls": out}
+
+
 # ========== LLM admission gate — the request-path queue (docs/LLM_ADMISSION_QUEUE.md) ==========
 # Clients call POST /admit BEFORE hitting a backend; run only on grant=true; POST /release
 # when done. The gate packs jobs into ONE global memory budget across Ollama+mlxlm+llamacpp,
@@ -2125,6 +2343,23 @@ def _autosize_ctx(body: dict, model: str, native_max: int, prompt_chars: int) ->
     return target if target > PROXY_CTX_DEFAULT else None
 
 
+# How much of each call to keep. The task stream exists to answer "what did I actually
+# send and what came back" — a 2000-char clip truncated mid-prompt answered neither, so
+# the ceiling is generous and the UI scrolls. Both ends are capped so one runaway
+# generation can't bloat the durable history file.
+CAPTURE_CHARS = int(os.environ.get("ATELIER_CAPTURE_CHARS", "20000"))
+
+
+def _clip(text, limit=None):
+    """Trim to the capture ceiling, but SAY SO — a silently truncated body reads as a
+    model that stopped early, which is a different (and alarming) bug."""
+    limit = limit or CAPTURE_CHARS
+    t = str(text or "")
+    if len(t) <= limit:
+        return t
+    return t[:limit] + f"\n\n… [truncated {len(t) - limit:,} more chars of {len(t):,}]"
+
+
 def _extract_prompt(body: dict) -> str:
     msgs = body.get("messages")
     if isinstance(msgs, list):
@@ -2134,9 +2369,118 @@ def _extract_prompt(body: dict) -> str:
             if isinstance(content, list):   # OpenAI structured content parts
                 content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
             parts.append(f"{mm.get('role','?')}: {content}")
-        return "\n".join(parts)[:2000]
-    p = body.get("prompt")
-    return str(p)[:2000] if p else ""
+        return _clip("\n".join(parts))
+    if body.get("prompt"):
+        return _clip(body["prompt"])
+    # EMBEDDINGS. /v1/embeddings and ollama /api/embed put the text in `input` — a string,
+    # a list of strings, or (rarely) pre-tokenised id lists. Reading only messages/prompt
+    # left every embedding call with an empty input pane while still reporting a token
+    # count, which read as "capture is broken" when it was simply the wrong field.
+    inp = body.get("input")
+    if isinstance(inp, str):
+        return _clip(inp)
+    if isinstance(inp, list) and inp:
+        if all(isinstance(x, str) for x in inp):
+            return _clip("\n---\n".join(f"[{i}] {x}" for i, x in enumerate(inp)))
+        return _clip(f"({len(inp)} pre-tokenised input(s) — ids, not text)")
+    return ""
+
+
+def _summarise_embeddings(j: dict) -> str:
+    """Embeddings have no reply TEXT — the answer is vectors. Say what came back
+    (how many, what width) instead of leaving the pane blank as if nothing arrived."""
+    data = j.get("data")
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "embedding" in data[0]:
+        dims = len(data[0]["embedding"] or [])
+        head = ", ".join(f"{v:.4f}" for v in (data[0]["embedding"] or [])[:8])
+        return (f"▣ {len(data)} embedding vector(s) × {dims} dims — no reply text.\n"
+                f"first vector starts: [{head} …]")
+    emb = j.get("embeddings") or ([j["embedding"]] if isinstance(j.get("embedding"), list) else None)
+    if isinstance(emb, list) and emb and isinstance(emb[0], list):
+        head = ", ".join(f"{v:.4f}" for v in emb[0][:8])
+        return (f"▣ {len(emb)} embedding vector(s) × {len(emb[0])} dims — no reply text.\n"
+                f"first vector starts: [{head} …]")
+    return ""
+
+
+def _extract_output(j: dict) -> str:
+    """The assistant's reply text, from either dialect.
+
+    ollama /api/chat -> message.content   ·  /api/generate -> response
+    OpenAI-style     -> choices[0].message.content (or .text for completions)"""
+    if not isinstance(j, dict):
+        return ""
+    emb = _summarise_embeddings(j)
+    if emb:
+        return emb
+    ch = j.get("choices")
+    if isinstance(ch, list) and ch:
+        c0 = ch[0] or {}
+        msg = c0.get("message") or c0.get("delta") or {}
+        if isinstance(msg, dict):
+            return _clip(_join_reasoning(msg.get("reasoning_content") or msg.get("reasoning"),
+                                        msg.get("content")) or c0.get("text") or "")
+        return _clip(c0.get("text") or "")
+    msg = j.get("message")
+    if isinstance(msg, dict) and (msg.get("content") or msg.get("thinking")):
+        return _clip(_join_reasoning(msg.get("thinking"), msg.get("content")))
+    return _clip(j.get("thinking") and _join_reasoning(j.get("thinking"), j.get("response"))
+                 or j.get("response") or "")
+
+
+def _join_reasoning(thinking, content) -> str:
+    """Reasoning models split their reply: the chain-of-thought lands in `thinking`
+    (ollama) / `reasoning_content` (OpenAI-style) and the answer in `content`.
+
+    Reading only `content` showed an EMPTY output for every reasoning model — and worse,
+    for a call cut short by num_predict the thinking is the only text that exists, so the
+    pane looked broken when the model had in fact produced plenty. Keep both, labelled,
+    so a truncated-in-thought call is legible instead of blank."""
+    t, c = (thinking or "").strip(), (content or "").strip()
+    if t and c:
+        return f"[thinking]\n{t}\n\n[answer]\n{c}"
+    if t:
+        return f"[thinking — no answer text was emitted]\n{t}"
+    return c
+
+
+def _output_from_stream(buf: bytes) -> str:
+    """Reassemble a streamed reply from its chunks.
+
+    A stream arrives as hundreds of fragments; each carries a sliver of text in
+    delta.content (OpenAI SSE) or message.content / response (ollama ndjson). Without
+    this, every streamed call — which is most interactive ones — showed no output at all."""
+    parts, think = [], []
+    for line in buf.decode("utf-8", "ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("data:"):
+            line = line[5:].strip()
+            if line == "[DONE]":
+                continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        ch = obj.get("choices")
+        if isinstance(ch, list) and ch:
+            d = (ch[0] or {}).get("delta") or (ch[0] or {}).get("message") or {}
+            if isinstance(d, dict):
+                if d.get("reasoning_content") or d.get("reasoning"):
+                    think.append(d.get("reasoning_content") or d.get("reasoning"))
+                if d.get("content"):
+                    parts.append(d["content"])
+            continue
+        m = obj.get("message")
+        if isinstance(m, dict):
+            if m.get("thinking"):
+                think.append(m["thinking"])
+            if m.get("content"):
+                parts.append(m["content"])
+        elif obj.get("response"):
+            parts.append(obj["response"])
+    return _clip(_join_reasoning("".join(think), "".join(parts)))
 
 
 def _usage_from_obj(j: dict):
@@ -2174,16 +2518,73 @@ def _usage_from_stream(buf: bytes, backend: str):
     return _usage_from_obj(last) if last else (None, None, None)
 
 
+def _extract_origin(request, body: dict) -> dict:
+    """WHO/WHAT made this call — the join key between an agent's own logs and this stream.
+
+    Without it every row from the LAN is just one bare IP, so a task-stream entry can
+    only be matched back to the office by eyeballing timestamps — which breaks the moment
+    two agents run at once. Callers attach identity in whatever way their stack allows, so
+    read all of them and keep the first that answers:
+
+      headers  X-Atelier-Origin / -Agent / -Task / -Session   (anything explicit)
+               X-Title, HTTP-Referer                          (OpenRouter-style, free in many clients)
+      body     user                                           (OpenAI standard field, survives LiteLLM)
+               metadata.{agent,task,task_id,session,trace_id}  (LiteLLM passes metadata through)
+
+    Everything is optional — a call with no identity is recorded exactly as before."""
+    h = {k.lower(): v for k, v in request.headers.items()}
+    d = {}
+    for key, hdr in (("origin", "x-atelier-origin"), ("agent", "x-atelier-agent"),
+                     ("task", "x-atelier-task"), ("session", "x-atelier-session"),
+                     ("title", "x-title"), ("referer", "http-referer")):
+        if h.get(hdr):
+            d[key] = str(h[hdr])[:200]
+    if isinstance(body, dict):
+        if body.get("user"):
+            d.setdefault("user", str(body["user"])[:200])
+        md = body.get("metadata")
+        if isinstance(md, dict):
+            for k in ("agent", "task", "task_id", "session", "session_id", "trace_id", "origin"):
+                if md.get(k):
+                    d.setdefault(k, str(md[k])[:200])
+    # WHO CONNECTED — always available, needs no cooperation from the caller. Once traffic
+    # is routed through the governor, ollama's own access log only ever shows 127.0.0.1
+    # (the governor forwarding), so the requester's real address exists ONLY here. This is
+    # what separates a LAN gateway box from a local Cline (127.0.0.1)
+    # when neither sets an identity header.
+    try:
+        if request.client and request.client.host:
+            d["caller_ip"] = request.client.host
+    except Exception:
+        pass
+    return d
+
+
+def _origin_label(d: dict) -> str:
+    """One short human string for the row, e.g. 'wuphf/researcher · task-1841'."""
+    if not d:
+        return ""
+    who = d.get("origin") or d.get("agent") or d.get("user") or d.get("title") or d.get("referer")
+    what = d.get("task") or d.get("task_id") or d.get("session") or d.get("session_id")
+    return " · ".join(x for x in (who, what) if x)[:160]
+
+
 def _record_proxy_call(path: str, model: str, backend: str, status: int,
                        latency_s: float, in_tok, out_tok, tok_s, prompt: str,
-                       num_ctx=None, est_gb=None):
+                       num_ctx=None, est_gb=None, output: str = "", origin: dict | None = None):
     ts = time.time()
     norm = path if path.startswith("/") else "/" + path
     entry = {"at": time.strftime("%H:%M:%S"), "ts": ts, "status": str(status),
              "latency": f"{latency_s:.2f}s", "path": norm, "model": model,
              "backend": backend, "via": "proxy", "prompt": prompt,
+             # what actually came BACK — the half the task stream never had, so a bad
+             # reply was invisible and only its token count showed up.
+             "output": output,
              "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s,
-             "num_ctx": num_ctx, "est_gb": round(est_gb, 1) if est_gb else None}
+             "num_ctx": num_ctx, "est_gb": round(est_gb, 1) if est_gb else None,
+             # who asked for it — the join back to the caller's own logs
+             "origin": _origin_label(origin or {}) or None,
+             "origin_detail": origin or None}
     _recent_calls.append(entry)
     _proxy_recent.append((norm, ts))
 
@@ -2264,6 +2665,13 @@ async def llm_proxy(backend: str, path: str, request: Request):
         await asyncio.sleep(1.0)
 
     fwd_headers = {"content-type": request.headers.get("content-type", "application/json")}
+    # Pass identity headers through rather than swallowing them — a backend or a
+    # downstream proxy may want the same attribution we are recording.
+    for _h in ("x-atelier-origin", "x-atelier-agent", "x-atelier-task",
+               "x-atelier-session", "x-title", "http-referer"):
+        if request.headers.get(_h):
+            fwd_headers[_h] = request.headers[_h]
+    origin = _extract_origin(request, body)
     t0 = time.time()
     if is_stream:
         media = "text/event-stream" if path.startswith("v1/") else "application/x-ndjson"
@@ -2282,7 +2690,8 @@ async def llm_proxy(backend: str, path: str, request: Request):
                 in_tok, out_tok, tok_s = _usage_from_stream(bytes(buf), backend)
                 _record_proxy_call(path, model, backend, status or 200,
                                    time.time() - t0, in_tok, out_tok, tok_s, prompt,
-                                   num_ctx=chosen_ctx, est_gb=est_hint)
+                                   num_ctx=chosen_ctx, est_gb=est_hint,
+                                   output=_output_from_stream(bytes(buf)), origin=origin)
                 if lease:
                     await gate.release(job_id=job_id)
 
@@ -2292,21 +2701,57 @@ async def llm_proxy(backend: str, path: str, request: Request):
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             r = await client.post(url, content=raw, headers=fwd_headers)
+        out_text = ""
         try:
-            in_tok, out_tok, tok_s = _usage_from_obj(r.json())
+            j = r.json()
+            in_tok, out_tok, tok_s = _usage_from_obj(j)
+            out_text = _extract_output(j)
         except Exception:
             in_tok = out_tok = tok_s = None
         _record_proxy_call(path, model, backend, r.status_code, time.time() - t0,
-                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
+                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx,
+                           est_gb=est_hint, output=out_text, origin=origin)
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "application/json"))
     except Exception as e:
         _record_proxy_call(path, model, backend, 502, time.time() - t0,
-                           None, None, None, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
+                           None, None, None, prompt, num_ctx=chosen_ctx, est_gb=est_hint,
+                           output=f"▲ proxy→{backend} failed: {e}", origin=origin)
         return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
     finally:
         if lease:
             await gate.release(job_id=job_id)
+
+
+# ---------- DROP-IN ollama surface: the governor answers ollama's own API shape ----------
+# Asking every client to rewrite its URL to /llm/ollama/... is the wrong ask on a machine
+# we own — and it is why traffic keeps escaping capture: Cline, LiteLLM and anything else
+# that only exposes a "base URL" setting cannot add a path prefix. Ollama's own logs are no
+# fallback: even at --log-verbosity 4 they record token COUNTS (task.n_tokens = 2156), never
+# prompt text, so a bypassed call is genuinely unrecoverable after the fact.
+#
+# So the governor speaks ollama natively at its root. A client changes ONLY the port
+# (11434 -> 8799) and every call is captured, with no path rewriting anywhere.
+# For fully transparent capture (zero client changes), move ollama to 11435 and let the
+# governor own 11434 — same code path, see docs.
+@app.post("/api/{path:path}")
+async def ollama_compat_post(path: str, request: Request):
+    return await llm_proxy("ollama", f"api/{path}", request)
+
+
+@app.get("/api/{path:path}")
+async def ollama_compat_get(path: str, request: Request):
+    return await llm_proxy_get("ollama", f"api/{path}", request)
+
+
+@app.post("/v1/{path:path}")
+async def openai_compat_post(path: str, request: Request):
+    return await llm_proxy("ollama", f"v1/{path}", request)
+
+
+@app.get("/v1/{path:path}")
+async def openai_compat_get(path: str, request: Request):
+    return await llm_proxy_get("ollama", f"v1/{path}", request)
 
 
 @app.get("/llm/{backend}/{path:path}")
