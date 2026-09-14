@@ -29,3 +29,21 @@ New sidecars are added to the dicts near the top of `server.py`: `SIDECAR_BASE` 
 ## Env
 
 `ATELIER_POLL_SECONDS` (10), `OLLAMA_URL`, `OLLAMA_LOG`, `ATELIER_AUTO_MAKE_ROOM` (1), `ATELIER_AUTO_COOLDOWN` (60), `ATELIER_PROBE_COOLDOWN` (60), `HUB_TOKEN`.
+
+## num_ctx auto-sizing — memory-aware ceiling (2026-07-24)
+
+The `/llm/ollama/{api/chat,api/generate}` proxy auto-injects `options.num_ctx`, sized to the
+prompt **and** to live free memory. `_autosize_ctx(body, model, native_max, prompt_chars)` grows
+num_ctx by powers of two until the prompt fits, then caps at `_headroom_ctx_ceiling(model, native_max)`:
+
+    ceiling = (gate.free_budget_gb() - gate.weights_gb(model) - RESERVE) / gate._kv_rate_for(model)
+
+bounded by the model's native max. This replaced a **static** `ATELIER_PROXY_CTX_CEILING` (32768),
+which choked long-context calls even when memory was free. Falls back to the static cap when the
+per-model KV rate is unknown or memory is tight; a caller-supplied `options.num_ctx` is always respected.
+
+- Env: `ATELIER_PROXY_CTX_HEADROOM_RESERVE_GB` (default 2) — GB kept free above the KV cache.
+- Verified: with ~20 GB free, ornith-9b auto-loaded at ctx=65536 (was 32768); 35B/70B stay conservative
+  under pressure (swap-death guard).
+- Companion (RAW :11434 callers, which bypass the proxy): the Ollama.app global default
+  (`db.sqlite settings.context_length` = 65536) + the `ollama-ctx` dial + `~/.config/ollama-ctx/registry.json`.

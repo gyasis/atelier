@@ -251,6 +251,19 @@ class Gate:
     def free_budget_gb(self, exclude_job: str | None = None) -> float:
         return round(self.budget_gb - self.committed_gb(exclude_job), 2)
 
+    @staticmethod
+    def _norm_name(name: str) -> str:
+        """Ollama treats `phi4-mini` and `phi4-mini:latest` as one model; compare that way."""
+        n = (name or "").strip().lower()
+        return n if ":" in n.rsplit("/", 1)[-1] else n + ":latest"
+
+    def _is_resident(self, backend: str, model: str) -> bool:
+        """Is this exact model loaded in `backend` (poller view)? Exact name after tag
+        normalization — NOT _serves' substring match, which would call `qwen3` loaded when
+        only `qwen3:1.7b` is."""
+        want = self._norm_name(model)
+        return any(b == backend and self._norm_name(m) == want for b, m in self._loaded)
+
     def _loaded_slots(self, backend: str, model: str) -> int:
         return sum(1 for L in self.leases.values()
                    if L.backend == backend and L.model == model)
@@ -279,13 +292,28 @@ class Gate:
         e = self.est_gb(model, est)
 
         # 1. Same model already resident with a free parallel slot → free grant (0 GB).
-        if self._loaded_slots(backend, model) > 0 and \
-           self._loaded_slots(backend, model) < self.num_parallel:
+        slots = self._loaded_slots(backend, model)
+        if 0 < slots < self.num_parallel:
             return self._grant(job_id, backend, model, est_gb=0.0, now=now,
                                reused=True, base_url=base_url, routed=routed,
                                note=f"shares loaded {model}")
 
         head = (not self.queue) or self.queue[0].job_id == job_id
+
+        # 1b. Same model loaded but IDLE (no lease) → ride the warm copy. Without this the
+        #     idle copy counts as untracked load, the request for that very model "doesn't
+        #     fit", and it waits for keep-alive to unload it — then pays a cold load and a
+        #     full prompt re-read on EVERY call (measured 2026-09-14: 15,571 tokens / 129 s
+        #     re-read for a call adding 44). Reserves the real footprint, since the model
+        #     really is resident. Only when at the queue head: a queued job may be waiting
+        #     for exactly this idle model to be evicted, and reuse must not starve it.
+        if slots == 0 and head and self._is_resident(backend, model):
+            over_cliff = self._live_blocks(0.0)      # only the over-the-cliff guard applies
+            if not over_cliff:
+                self._dequeue(job_id)
+                return self._grant(job_id, backend, model, est_gb=e, now=now,
+                                   reused=True, base_url=base_url, routed=routed,
+                                   note=f"reuses idle loaded {model}")
         budget_fits = self.committed_gb() + e <= self.budget_gb
         live_block = self._live_blocks(e)        # HARD measured-memory backstop
         fits = budget_fits and not live_block

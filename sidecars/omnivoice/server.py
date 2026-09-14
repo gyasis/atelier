@@ -25,6 +25,7 @@ import asyncio
 import gc
 import io
 import os
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -49,6 +50,17 @@ IDLE_UNLOAD_SECONDS = int(os.environ.get("IDLE_UNLOAD_SECONDS", "240"))
 KEEP_WARM = os.environ.get("KEEP_WARM", "false").lower() in ("1", "true", "yes")
 IDLE_TICK_SECONDS = 30
 DTYPE = torch.float16 if DEVICE != "cpu" else torch.float32
+# MPS reclaim: torch.mps.empty_cache() does NOT return RSS to the OS (the allocator keeps the
+# model's buffers mapped in-process), so above this resident size we free memory the only way
+# that works on Metal — self-restart the process (launchd relaunches cold). Cold baseline is
+# ~1 GB (torch import), so >2 GB means a model's memory is still mapped and must be reclaimed.
+# omnivoice fresh cold baseline is ~1.1 GB; 1.3 catches a leaked model/cache (which lands ~1.6+)
+# while staying above the clean baseline so it doesn't restart-loop. (Governor auto-heal backstops.)
+RECLAIM_THRESHOLD_GB = float(os.environ.get("OMNIVOICE_RECLAIM_THRESHOLD_GB", "1.3"))
+# Hung-generate ceiling: no legitimate TTS synth runs this long. If a generate thread exceeds
+# it, the thread is wedged (asyncio.to_thread threads can't be cancelled) — the busy signal is
+# "real" but stuck forever, pinning _active>0 and blocking every unload. Recover by restarting.
+MAX_GEN_HANG_S = float(os.environ.get("OMNIVOICE_MAX_GEN_HANG_S", "600"))
 
 _model: OmniVoice | None = None
 _warmed: bool = False
@@ -61,6 +73,7 @@ _idle_unloaded_at: float | None = None
 # never unload while _active>0 or _waiting>0, regardless of the idle timer.
 _active: int = 0
 _waiting: int = 0
+_gen_started_at: float | None = None   # monotonic ts the CURRENT generate began (None = none running)
 
 
 async def _load_and_warm():
@@ -97,6 +110,48 @@ def _empty_accel_cache():
             print(f"[omnivoice-local] mps empty_cache failed: {e}")
 
 
+def _self_rss_gb() -> float:
+    """Current RSS of THIS process (GB, via ps) — the honest 'am I still holding memory' check.
+    Used to decide whether an MPS reclaim-restart is actually needed (vs already cold)."""
+    try:
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                             capture_output=True, text=True, timeout=3).stdout.strip()
+        return round(int(out) / 1048576, 2) if out else 0.0
+    except Exception:
+        return 0.0
+
+
+def _reclaim_via_restart(reason: str) -> None:
+    """MPS-only. torch.mps.empty_cache() can't hand RSS back to the OS, so a logical unload
+    leaves gigabytes resident (the observed 9.2 GB 'cold' phantom). The ONLY reliable reclaim
+    is to exit and let launchd relaunch us cold. Exit NON-ZERO so KeepAlive{SuccessfulExit:false}
+    restarts the process; the next /tts lazy-loads the model. Only invoked when idle (the callers
+    guard on _active==0 / _waiting==0), so no in-flight synthesis is lost."""
+    print(f"[omnivoice-local] {reason}: RSS={_self_rss_gb()}GB still mapped after unload — "
+          f"self-restarting to return MPS memory to the OS (launchd relaunches cold)", flush=True)
+    os._exit(42)   # hard exit (skip atexit/uvicorn drain — we WANT the pages freed immediately)
+
+
+async def _delayed_restart(delay: float, reason: str) -> None:
+    """Restart after a short delay so an in-flight HTTP response (e.g. the governor's
+    /admin/unload call) flushes to the caller before the process exits."""
+    await asyncio.sleep(delay)
+    _reclaim_via_restart(reason)
+
+
+def _active_elapsed_s() -> float | None:
+    """Seconds the current generate has been running (None if idle) — makes 'busy' OBSERVABLE:
+    a real synth reads a few seconds; a wedged/false signal reads absurdly large."""
+    return round(time.monotonic() - _gen_started_at, 1) if _gen_started_at is not None else None
+
+
+def _really_generating() -> bool:
+    """Ground-truth busy: the in-flight counter AND the single-flight semaphore must BOTH agree.
+    `_active` is only >0 while a generate holds `_sem`, so a lone `_active>0` with a FREE
+    semaphore is a desynced/false signal — and must NOT be allowed to block an unload forever."""
+    return _active > 0 and _sem.locked()
+
+
 async def _unload_model():
     global _model, _warmed, _idle_unloaded_at
     had_model = _model is not None
@@ -118,12 +173,28 @@ async def _idle_watcher():
         await asyncio.sleep(IDLE_TICK_SECONDS)
         if _model is None:
             continue
+        # Hung-generate recovery: a generate that has run absurdly long is a wedged thread
+        # (asyncio.to_thread threads can't be cancelled) — it pins _active>0 forever, blocking
+        # every unload. NEVER fires for a normal synth (ceiling >> any real synth). MPS restarts
+        # to recover (known KeepAlive); other devices just warn (don't assume their restart policy).
+        elapsed = _active_elapsed_s()
+        if _active > 0 and elapsed is not None and elapsed > MAX_GEN_HANG_S:
+            print(f"[omnivoice-local] HUNG generate {elapsed}s > {MAX_GEN_HANG_S}s ceiling — "
+                  f"{'force-restarting to recover' if DEVICE == 'mps' else 'WARN (no auto-recover here)'}",
+                  flush=True)
+            if DEVICE == "mps":
+                _reclaim_via_restart("hung-generate")
+            continue
         # Busy-aware: never reap a model that's working or has queued work,
         # no matter how long the idle timer has run (protects long renders).
         if _active == 0 and _waiting == 0 and time.monotonic() - _last_request_at > IDLE_UNLOAD_SECONDS:
             async with _sem:
                 if _model is not None and _active == 0:
                     await _unload_model()
+                    # On MPS the empty_cache above can't return RSS — restart to actually free
+                    # it. Idle + sem-held here, so nothing is in flight.
+                    if DEVICE == "mps" and _self_rss_gb() > RECLAIM_THRESHOLD_GB:
+                        _reclaim_via_restart("idle-unload")
 
 
 @asynccontextmanager
@@ -159,13 +230,15 @@ def healthz():
 def readyz():
     loaded = _warmed and _model is not None
     state = "warm" if loaded else "cold"
-    lifecycle = "cold" if not loaded else ("busy" if _active > 0 else "idle")
+    lifecycle = "cold" if not loaded else ("busy" if _really_generating() else "idle")
     return {
         "ok": True,
         "state": state,
         "lifecycle": lifecycle,
-        "busy": _active > 0,
+        "busy": _really_generating(),
         "active_jobs": _active,
+        "active_elapsed_s": _active_elapsed_s(),   # how long the current generate has run (None=idle)
+        "sem_held": _sem.locked(),                 # ground-truth: is the single-flight lock held?
         "queue_depth": _waiting,
         "warmed": _warmed,
         "model": MODEL_ID if _model else None,
@@ -185,13 +258,29 @@ async def admin_unload(request: Request):
     semaphore — it can't kill a thread mid-generate, only unload right after."""
     _check_auth(request)
     force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
-    if _active > 0 and not force:
-        return {"unloaded": False, "refused": "busy", "active_jobs": _active}
+    # Refuse ONLY on ground-truth busy (counter AND semaphore agree). A real generate is sacred.
+    if _really_generating() and not force:
+        return {"unloaded": False, "refused": "busy", "active_jobs": _active,
+                "active_elapsed_s": _active_elapsed_s()}
+    if _active > 0 and not _sem.locked():
+        # Counter says busy but nothing holds the single-flight lock → false/stale signal.
+        # Do NOT let it block a reclaim; surface it so a real desync would be visible.
+        print(f"[omnivoice-local] STALE busy signal: _active={_active} but semaphore free — "
+              f"treating as idle (proceeding with unload)", flush=True)
     was_loaded = _model is not None
     if was_loaded:
         async with _sem:
             await _unload_model()
-    return {"unloaded": was_loaded, "forced": force, "model": MODEL_ID, "device": DEVICE}
+    # On MPS, empty_cache doesn't return RSS — if we're STILL holding memory (model just
+    # unloaded, OR a prior soft-unload leaked and left model=None but GBs mapped), self-restart
+    # to actually reclaim it. Delay the exit so this response flushes to the caller first.
+    reclaim = "empty_cache"
+    rss = _self_rss_gb()
+    if DEVICE == "mps" and rss > RECLAIM_THRESHOLD_GB:
+        reclaim = "process-restart"
+        asyncio.create_task(_delayed_restart(0.6, "admin/unload"))
+    return {"unloaded": was_loaded, "forced": force, "model": MODEL_ID, "device": DEVICE,
+            "reclaim": reclaim, "rss_gb": rss}
 
 
 @app.get("/agent")
@@ -258,7 +347,7 @@ class TtsReq(BaseModel):
 
 @app.post("/tts")
 async def tts(req: TtsReq, request: Request):
-    global _last_request_at, _active, _waiting
+    global _last_request_at, _active, _waiting, _gen_started_at
     _check_auth(request)
     if not req.text.strip():
         raise HTTPException(400, "empty text")
@@ -273,6 +362,7 @@ async def tts(req: TtsReq, request: Request):
     async with _sem:
         _waiting -= 1
         _active += 1                   # now busy — watcher won't reap us
+        _gen_started_at = time.monotonic()   # stamp start → active_elapsed_s + hung detection
         try:
             gen_cfg = OmniVoiceGenerationConfig(
                 num_step=req.num_step,
@@ -291,6 +381,7 @@ async def tts(req: TtsReq, request: Request):
             raise HTTPException(500, f"synthesis failed: {e}")
         finally:
             _active -= 1                # no longer busy
+            _gen_started_at = None      # generate finished (or errored/cancelled) → clear the clock
             _last_request_at = time.monotonic()   # idle clock starts at job END
     elapsed = time.perf_counter() - t0
     # OmniVoice.generate() returns list[np.ndarray] — take the first (batch=1)

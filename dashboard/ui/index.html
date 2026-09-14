@@ -125,8 +125,12 @@
     margin-top: 3px;
   }
 
-  /* charts fill remaining space */
-  .chart-wrap { position: relative; flex: 1 1 auto; min-height: 0; }
+  /* charts fill remaining space. min-width:0 + overflow:hidden let the box SHRINK with
+     the panel instead of the canvas overflowing past the border (the clip you saw);
+     Chart.js (responsive + maintainAspectRatio:false) then fills whatever box remains. */
+  .chart-wrap { position: relative; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; }
+  /* let Chart.js own the pixel size; never let a canvas push its container wider */
+  canvas { display: block; max-width: 100%; }
 
   /* ---- Tenants card grid ---- */
   .tenant-grid {
@@ -179,28 +183,117 @@
   .via-governor-probe { background:rgba(155,110,200,.20); color:#b78fd4; }
   .via-log { background:rgba(110,134,200,.16); color:#9fb0d8; }
   .route-empty { font-size:10px; color:var(--text-3); font-style:italic; }
-  /* Task-stream rows are hoverable; the floating detail card shows full per-call info */
+  /* Rich hover/detail card — shared by the task stream AND chart points (.richcard). */
   tr[data-task] { cursor: help; }
   tr[data-task]:hover > td { background: rgba(200,169,110,0.06); }
-  #taskHover {
+  .richcard {
     position: fixed; z-index: 9999; width: 340px; max-height: 80vh; overflow:auto;
     background: rgba(18,18,20,0.97); border: 1px solid var(--gold-dim, rgba(200,169,110,0.45));
     border-radius: 8px; padding: 10px 12px; box-shadow: 0 8px 28px rgba(0,0,0,0.55);
     font-family: var(--mono, monospace); font-size: 11px; color: var(--text, #e8e4dc);
     pointer-events: none; backdrop-filter: blur(3px);
   }
-  #taskHover .thh { font-size:12px; font-weight:600; margin-bottom:6px; padding-bottom:6px;
-    border-bottom:1px solid rgba(200,169,110,0.18); display:flex; justify-content:space-between; gap:8px; }
-  #taskHover .thk { color: var(--gold-dim, #c8a96e); font-size:9px; letter-spacing:.08em; }
-  #taskHover .thr { display:flex; justify-content:space-between; gap:10px; padding:1.5px 0; }
-  #taskHover .thr span { color: rgba(232,228,220,0.55); }
-  #taskHover .thr b { color: var(--text, #e8e4dc); font-weight:500; text-align:right; }
-  #taskHover .thp { margin-top:7px; padding-top:6px; border-top:1px solid rgba(200,169,110,0.18); }
-  #taskHover .thp > span { color: rgba(232,228,220,0.55); display:block; margin-bottom:3px; }
-  #taskHover .thp > div { white-space:pre-wrap; word-break:break-word; color:var(--text,#e8e4dc);
+  /* Pinned (task card only): stays open and interactive so you can scroll/select/copy the call */
+  .richcard.pinned {
+    pointer-events: auto; width: 420px; max-height: 88vh;
+    border-color: var(--gold, #c8a96e); box-shadow: 0 12px 38px rgba(0,0,0,0.72);
+  }
+  .richcard .thh { font-size:12px; font-weight:600; margin-bottom:6px; padding-bottom:6px;
+    border-bottom:1px solid rgba(200,169,110,0.18); display:flex; justify-content:space-between;
+    align-items:flex-start; gap:8px; }
+  .richcard .thh-r { display:flex; align-items:center; gap:8px; flex:none; }
+  .richcard .thx { display:none; cursor:pointer; color:rgba(232,228,220,0.45); font-size:13px;
+    line-height:1; padding:0 2px; }
+  .richcard.pinned .thx { display:inline; }
+  .richcard .thx:hover { color: var(--gold, #c8a96e); }
+  .richcard .thk { color: var(--gold-dim, #c8a96e); font-size:9px; letter-spacing:.08em; }
+  .richcard .thr { display:flex; justify-content:space-between; gap:10px; padding:1.5px 0; }
+  .richcard .thr span { color: rgba(232,228,220,0.55); }
+  .richcard .thr b { color: var(--text, #e8e4dc); font-weight:500; text-align:right; }
+  .richcard .thp { margin-top:7px; padding-top:6px; border-top:1px solid rgba(200,169,110,0.18); }
+  .richcard .thp > span { color: rgba(232,228,220,0.55); display:block; margin-bottom:3px; }
+  .richcard .thp > div { white-space:pre-wrap; word-break:break-word; color:var(--text,#e8e4dc);
     max-height:160px; overflow:auto; }
-  #taskHover .thp.muted > div { color: rgba(232,228,220,0.4); font-style:italic; }
-  #taskHover .ths { margin-top:7px; font-size:9px; color: rgba(232,228,220,0.4); text-align:right; }
+  .richcard .thp.muted > div { color: rgba(232,228,220,0.4); font-style:italic; }
+  .richcard .ths { margin-top:7px; font-size:9px; color: rgba(232,228,220,0.4); text-align:right; }
+
+  /* ---- Task detail MODAL (double-click a task row) ----
+     The hover card is a peek; this is the read view. Full input AND output, each in
+     its own scroll region, sized to the viewport so a long prompt never pushes the
+     reply off-screen — the thing you actually opened it to read. */
+  .tmodal-back {
+    position: fixed; inset: 0; z-index: 10000; display: flex;
+    align-items: center; justify-content: center; padding: 4vh 4vw;
+    background: rgba(0,0,0,0.62); backdrop-filter: blur(2px);
+  }
+  .tmodal {
+    display: flex; flex-direction: column; width: min(1100px, 96vw);
+    /* A real min-height is load-bearing: the panes below are flex:1 1 0, so with a
+       content-sized parent they collapse to 0px and the output — the thing you opened
+       this for — becomes invisible whenever the reply is short. */
+    height: min(720px, 88vh); max-height: 92vh;
+    background: rgba(18,18,20,0.985); border: 1px solid var(--gold, #c8a96e);
+    border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,0.8);
+    font-family: var(--mono, monospace); color: var(--text, #e8e4dc); overflow: hidden;
+  }
+  .tmodal header {
+    display: flex; align-items: baseline; gap: 12px; flex: none;
+    padding: 12px 16px; border-bottom: 1px solid rgba(200,169,110,0.25);
+  }
+  .tmodal header .tm-title { font-size: 13px; font-weight: 600; }
+  .tmodal header .tm-kind {
+    color: var(--gold-dim, #c8a96e); font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  }
+  .tmodal header .tm-x {
+    margin-left: auto; cursor: pointer; color: rgba(232,228,220,0.5);
+    font-size: 17px; line-height: 1; padding: 0 4px;
+  }
+  .tmodal header .tm-x:hover { color: var(--gold, #c8a96e); }
+  /* facts strip — wraps, never scrolls; the bodies below get the height */
+  .tmodal .tm-facts {
+    flex: none; display: flex; flex-wrap: wrap; gap: 6px 18px;
+    padding: 9px 16px; border-bottom: 1px solid rgba(200,169,110,0.15);
+    font-size: 10px; background: rgba(200,169,110,0.03);
+  }
+  .tmodal .tm-facts b { color: var(--text, #e8e4dc); font-weight: 500; }
+  .tmodal .tm-facts span { color: rgba(232,228,220,0.5); margin-right: 5px; }
+  /* the two bodies split the remaining height and scroll independently */
+  .tmodal .tm-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .tmodal .tm-sec { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+  .tmodal .tm-sec + .tm-sec { border-top: 1px solid rgba(200,169,110,0.22); }
+  .tmodal .tm-sec > h4 {
+    flex: none; margin: 0; padding: 7px 16px; font-size: 9px; font-weight: 600;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--gold-dim, #c8a96e);
+    background: rgba(200,169,110,0.05); display: flex; align-items: center; gap: 10px;
+  }
+  .tmodal .tm-sec > h4 .tm-meta { color: rgba(232,228,220,0.4); letter-spacing: .04em; text-transform: none; font-weight: 400; }
+  .tmodal .tm-sec > h4 .tm-copy {
+    margin-left: auto; cursor: pointer; letter-spacing: .04em; text-transform: none;
+    color: rgba(232,228,220,0.45); font-weight: 400; border: 1px solid rgba(200,169,110,0.28);
+    border-radius: 4px; padding: 1px 7px;
+  }
+  .tmodal .tm-sec > h4 .tm-copy:hover { color: var(--gold, #c8a96e); border-color: var(--gold, #c8a96e); }
+  .tmodal .tm-sec > pre {
+    flex: 1 1 auto; min-height: 3.5em; overflow: auto; margin: 0; padding: 10px 16px 14px;
+    white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.5;
+    font-family: var(--mono, monospace);
+  }
+  .tmodal .tm-sec > pre.empty { color: rgba(232,228,220,0.38); font-style: italic; }
+
+  /* task-stream filter — the stream is a rolling window; scanning it by eye for one
+     agent's call does not scale past a handful of rows. */
+  .tfilter {
+    flex: none; width: 168px; background: rgba(255,255,255,0.04); color: var(--text, #e8e4dc);
+    border: 1px solid rgba(200,169,110,0.25); border-radius: 4px; padding: 2px 7px;
+    font-family: var(--mono, monospace); font-size: 10px; outline: none;
+  }
+  .tfilter:focus { border-color: var(--gold, #c8a96e); background: rgba(200,169,110,0.07); }
+  .tfilter::placeholder { color: rgba(232,228,220,0.32); }
+  /* origin badge on a row: which agent/task produced it */
+  tr[data-task] .origin {
+    display: block; font-size: 8.5px; letter-spacing: .04em;
+    color: var(--gold-dim, #c8a96e); opacity: .85; margin-top: 1px;
+  }
   .tcard .name {
     font-family: var(--mono);
     font-size: 12px;
@@ -280,6 +373,15 @@
   .pill.queue { color: var(--text-3); }
   .pill.fail { color: var(--cliff); border-color: rgba(194,85,75,0.4); }
 
+  /* ---- Framework badges / sidecar chips (keep-warm, device, governed, mem, models) ---- */
+  .badge-warm { color: var(--gold); font-size: 9px; margin-left: 4px; }
+  .chip-device, .chip-governed, .chip-mem, .chip-models {
+    display: inline-block; font-family: var(--sans); font-size: 8px; letter-spacing: 0.04em;
+    text-transform: uppercase; padding: 1px 5px; margin: 2px 4px 0 0;
+    border: 1px solid var(--line-strong); border-radius: 3px; color: var(--text-2);
+  }
+  .chip-governed { color: var(--up); border-color: rgba(95,168,107,0.3); }
+
   /* ---- Gantt / swimlane ---- */
   .gantt {
     flex: none;
@@ -341,7 +443,7 @@
     color: var(--text-3);
     margin-bottom: 2px;
   }
-  .mini-wrap { position: relative; min-height: 0; }
+  .mini-wrap { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
 
   .legend { display: flex; flex-direction: column; gap: 4px; justify-content: center; }
   .lg-row { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10px; }
@@ -490,7 +592,8 @@
     <section class="panel" data-od-id="tasks-panel">
       <div class="phead">
         <span class="ptitle"><span class="dot"></span>Task Stream</span>
-        <span class="big-readout"><span class="n" style="font-size:22px">14</span><span class="u">/hr</span></span>
+        <input id="taskFilter" class="tfilter" type="search" placeholder="filter: agent, model, text…"
+               title="Filters rows on origin, model, client, prompt and reply text" />
       </div>
       <div class="pbody">
         <div class="gantt" data-od-id="task-gantt">
@@ -513,7 +616,10 @@
       <div class="phead"><span class="ptitle"><span class="dot"></span>Loaded Now · 64GB</span></div>
       <div class="pbody">
         <div class="pie-flex">
-          <div class="mini-wrap" style="height:100%"><canvas id="pieChart"></canvas></div>
+          <!-- no inline height: the .pie-flex rule below gives this wrap its size by
+               stretch. An inline height:100% overrode it (inline beats stylesheet) and
+               made the wrap's box stop tracking the panel. -->
+          <div class="mini-wrap"><canvas id="pieChart"></canvas></div>
           <div class="legend" id="pieLegend"></div>
         </div>
       </div>
@@ -559,7 +665,7 @@
     </section></div></div>
 
     <!-- Routing control tower : LLM admission gate (budget / backends / queue / routing) -->
-    <div class="grid-stack-item" gs-id="routing-panel" gs-x="0" gs-y="12" gs-w="12" gs-h="5"><div class="grid-stack-item-content">
+    <div class="grid-stack-item" gs-id="routing-panel" gs-x="0" gs-y="12" gs-w="8" gs-h="5"><div class="grid-stack-item-content">
     <section class="panel" data-od-id="routing-panel">
       <div class="phead">
         <span class="ptitle"><span class="dot"></span>Routing · LLM Admission Gate</span>
@@ -571,6 +677,30 @@
           <div class="route-col"><div class="route-h">Backends · loaded / leased</div><div id="routeBackends"><div class="route-empty">…</div></div></div>
           <div class="route-col"><div class="route-h">Queue (waiting for memory)</div><div id="routeQueue"><div class="route-empty">…</div></div></div>
           <div class="route-col route-col-wide"><div class="route-h">Recent routing</div><div class="tbl-scroll" style="flex:1"><div id="routeRecent"></div></div></div>
+        </div>
+      </div>
+    </section></div></div>
+
+    <!-- Atelier Framework : the governor's constitution (laws + auto-heal policy) — the
+         "framework" IS the Atelier framework: 3 laws + auto-heal thresholds + recent events -->
+    <div class="grid-stack-item" gs-id="framework-panel" gs-x="8" gs-y="12" gs-w="4" gs-h="5"><div class="grid-stack-item-content">
+    <section class="panel" data-od-id="framework-panel">
+      <div class="phead">
+        <span class="ptitle"><span class="dot"></span>Atelier Framework</span>
+        <span class="big-readout"><span class="n" id="fwAutohealBadge" style="font-size:12px;color:var(--text-2)">—</span></span>
+      </div>
+      <div class="pbody" style="gap:10px">
+        <div>
+          <div class="route-h">Constitution</div>
+          <ol id="fwLaws" style="margin:0 0 0 14px;padding:0;font-size:10.5px;color:var(--text);line-height:1.55"></ol>
+        </div>
+        <div>
+          <div class="route-h">Auto-heal policy</div>
+          <div id="fwAutoheal" style="font-size:10.5px;color:var(--text-2);line-height:1.5">—</div>
+        </div>
+        <div class="tbl-scroll" style="flex:1 1 auto">
+          <div class="route-h">Recent auto-heals</div>
+          <div id="fwAutohealEvents"><div class="route-empty">…</div></div>
         </div>
       </div>
     </section></div></div>
@@ -600,11 +730,12 @@ function thresholdLine(val, color, dash){
     data: new Array(memN).fill(val), pointRadius:0, fill:false, tension:0 };
 }
 
-new Chart(document.getElementById('memChart'), {
+const _memChart = new Chart(document.getElementById('memChart'), {
   type:'line',
   data:{ labels: memLabels, datasets:[
     // [0] baseline band (grey, filled to origin): macOS + apps — memory you can't reclaim
     { label:'baseline', data: baseData, borderColor:'#5a5c66', borderWidth:1, pointRadius:0,
+      pointHoverRadius:4, pointHoverBackgroundColor:GOLD,
       tension:0.3, fill:'origin', backgroundColor:'rgba(69,71,81,0.38)' },
     // [1] resident = baseline + LLM (gold, filled DOWN to the baseline): the gap = LLM load,
     //     the line itself = live resident pressure vs the warn/cliff thresholds.
@@ -614,27 +745,28 @@ new Chart(document.getElementById('memChart'), {
     { ...thresholdLine(55, '#C2554B', [5,4]) },
   ]},
   options:{ maintainAspectRatio:false, responsive:true,
-    plugins:{ legend:{display:false}, tooltip:{enabled:true, mode:'index', intersect:false,
-      callbacks:{
-        title:()=>'',
-        label:(c)=>{
-          if (c.datasetIndex===0) return `baseline ${(+c.parsed.y).toFixed(1)} GB (macOS+apps)`;
-          if (c.datasetIndex===1){
-            const base = +(c.chart.data.datasets[0].data[c.dataIndex] ?? 0);
-            const llm = Math.max(0, c.parsed.y - base);
-            return [`LLM load ${llm.toFixed(1)} GB`, `resident ${(+c.parsed.y).toFixed(1)} GB (live)`];
-          }
-          return null;
-        },
-        afterBody:(items)=> items.some(i=>i.datasetIndex===0) && _lastTop.length
-          ? ['', 'in the baseline:'].concat(_lastTop.slice(0,5).map(p=>`  ${p.name} ${(+p.gb).toFixed(1)}G`))
-          : null,
-      } } },
+    interaction:{ mode:'index', intersect:false },
+    // Rich hover card (shared with the task stream + latency chart). Per-point meta —
+    // baseline / LLM-load / resident + the top procs at that sample — is built in the poll.
+    plugins:{ legend:{display:false}, tooltip:{ enabled:false, mode:'index', intersect:false, external: richChartTooltip } },
     scales:{ x:{ display:false, grid:{display:false} },
       // max covers the full ~69GB machine (72 matches the HUD sparkline). min 0 so the
       // baseline band reads from the floor, not a clipped 14.
       y:{ min:0, max:72, grid:{color:GRID}, ticks:{ stepSize:10, callback:v=>v+'G' } } } }
 });
+_memChart._hoverTitle = 'system memory'; _memChart._hoverKind = 'MEM'; _memChart._hoverUnit = 'GB';
+
+// ---------- Chart sizing: measure the REAL container, don't ask Chart.js to guess ----------
+// A chart's container is its canvas's PARENT (.mini-wrap), not the panel. Argument-less
+// chart.resize() re-reads that parent but bails out early once the backing store matches,
+// which is how the doughnut kept a stale radius. Passing measured px always re-lays out.
+function fitChart(chart){
+  if (!chart || !chart.canvas) return;
+  const host = chart.canvas.parentElement;
+  const r = host && host.getBoundingClientRect();
+  if (r && r.width > 1 && r.height > 1) chart.resize(r.width, r.height);
+  else chart.resize();
+}
 
 // ---------- Pie : starts empty, filled by live poll ----------
 new Chart(document.getElementById('pieChart'), {
@@ -645,41 +777,80 @@ new Chart(document.getElementById('pieChart'), {
 });
 document.getElementById('pieLegend').innerHTML = '<div class="lg-row" style="color:var(--text-3)">waiting for data…</div>';
 
+// ---- Reusable rich hover card for Chart.js points ----
+// Any chart opts in by: (a) setting chart._pointMeta = [meta,…] parallel to dataset 0's
+// data, and (b) using { enabled:false, external: richChartTooltip } in its tooltip config.
+// The meta objects are the SAME shape the task stream uses, so _fmtTaskHover renders them
+// identically — hover a point on the latency line and you get the full per-request card.
+const _chartCard = document.createElement('div');
+_chartCard.id = 'chartHover'; _chartCard.className = 'richcard';
+_chartCard.style.display = 'none'; _chartCard.style.pointerEvents = 'none';
+document.body.appendChild(_chartCard);
+function richChartTooltip(ctx){
+  const { chart, tooltip } = ctx;
+  if (!tooltip || tooltip.opacity === 0){ _chartCard.style.display = 'none'; return; }
+  const pts = tooltip.dataPoints || [];
+  const dp = pts.find(p => p.datasetIndex === 0) || pts[0];   // dataset 0 = the real series
+  if (!dp){ _chartCard.style.display = 'none'; return; }
+  const meta = (chart._pointMeta || [])[dp.dataIndex];
+  const m = meta || { name: chart._hoverTitle || chart.canvas.id, kind: chart._hoverKind || '',
+                      value: dp.parsed.y, unit: chart._hoverUnit || '', source: 'chart', hint: '' };
+  _chartCard.innerHTML = _fmtTaskHover(m);
+  _chartCard.style.display = 'block';
+  // Position beside the point, clamped to the viewport; flip to the left edge if it would overflow.
+  const rect = chart.canvas.getBoundingClientRect();
+  const px = rect.left + dp.element.x, py = rect.top + dp.element.y;
+  let left = px + 14;
+  if (left + _chartCard.offsetWidth + 12 > window.innerWidth) left = px - _chartCard.offsetWidth - 14;
+  let top = py - _chartCard.offsetHeight / 2;
+  top = Math.max(8, Math.min(top, window.innerHeight - _chartCard.offsetHeight - 12));
+  _chartCard.style.left = Math.max(8, left) + 'px';
+  _chartCard.style.top = top + 'px';
+}
+
 // ---------- TTFT + tokens/sec line graphs — start empty ----------
-function miniLine(id, data, warn, max){
-  new Chart(document.getElementById(id), {
+function miniLine(id, data, warn, max, hover){
+  const chart = new Chart(document.getElementById(id), {
     type:'line',
     data:{ labels: data.map((_,i)=>i+1), datasets:[
-      { data, borderColor: GOLD, borderWidth:1.4, pointRadius:0, tension:0.25,
+      { data, borderColor: GOLD, borderWidth:1.4, pointRadius:0, pointHoverRadius:4,
+        pointHoverBackgroundColor:GOLD, tension:0.25,
         fill:true, backgroundColor:'rgba(200,169,110,0.10)' },
       { data:new Array(Math.max(data.length,10)).fill(warn), borderColor:'#C99A52', borderWidth:1,
         borderDash:[4,3], pointRadius:0, fill:false } ]},
     options:{ maintainAspectRatio:false, responsive:true,
-      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ title:()=>'', label:c=>c.datasetIndex===0?c.parsed.y:null } } },
+      interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{display:false}, tooltip:{ enabled:false, external: richChartTooltip } },
       scales:{ x:{ display:false, grid:{display:false} },
         y:{ min:0, max, grid:{color:GRID}, ticks:{ maxTicksLimit:3 } } } }
   });
+  // Fallback labels for points that don't carry full meta (e.g. tokens/sec sparkline)
+  if (hover){ chart._hoverTitle = hover.title; chart._hoverUnit = hover.unit; chart._hoverKind = hover.kind; }
+  return chart;
 }
-miniLine('ttftChart', [], 800, 120000);   // inference latency: default 0–120s until data arrives
-miniLine('tpsChart', [], 30, 75);
+miniLine('ttftChart', [], 800, 120000, { title:'inference latency', kind:'LLM', unit:'ms' });   // default 0–120s until data arrives
+miniLine('tpsChart', [], 30, 75, { title:'tokens / sec', kind:'perf', unit:'tok/s' });
 
 // Adaptive y-axis: scale to the live data so a single slow request (e.g. a 120s
 // spike) doesn't flatten everything into the floor — while keeping the warn line
 // in view and a sane minimum range when values are tiny. Reads warn from dataset[1].
 // headroom: axis-max = peak × headroom (2.0 → peak sits ~50% down from the top).
 // emptyMax: the default ceiling to show when there's no data yet (e.g. 120000ms = 120s).
-function fitY(chart, headroom = 1.2, emptyMax = null){
+function fitY(chart, headroom = 1.2, emptyMax = null, floorMax = null){
   const warn = Number(chart.data.datasets[1]?.data?.[0]) || 0;
   const vals = chart.data.datasets[0].data.filter(v => v != null && isFinite(v));
   if (!vals.length) {                                          // no data → default ceiling
-    if (emptyMax != null) chart.options.scales.y.max = emptyMax;
+    if (emptyMax != null) chart.options.scales.y.max = Math.max(emptyMax, floorMax || 0);
     return;
   }
   const peak = Math.max(warn, ...vals);
   const padded = peak * headroom;
   const mag = Math.pow(10, Math.floor(Math.log10(padded || 1)));
   const nice = Math.ceil(padded / mag) * mag;                  // round up to clean ticks
-  chart.options.scales.y.max = Math.max(nice, warn * 1.25, 1); // keep warn visible
+  // floorMax: never let the axis compress below this (e.g. 30s for synth latency —
+  // TTS/whisper/dia requests routinely run up to ~30s and shouldn't get clipped by
+  // the adaptive scale-to-data behavior). Adaptive growth ABOVE floorMax still applies.
+  chart.options.scales.y.max = Math.max(nice, warn * 1.25, 1, floorMax || 0); // keep warn visible
 }
 
 // ---------- Gantt swimlane — starts empty, built from real log metrics ----------
@@ -748,6 +919,7 @@ async function tauriGet(cmd) {
 
 const memRing = [...memData]; // rolling 60-sample buffer (resident / top edge)
 const baseRing = [...baseData]; // rolling baseline (non-LLM) buffer
+const memMetaRing = [...memData]; // parallel per-sample rich-card meta (kept index-aligned with memRing)
 
 // Historical tracking for sidecar "since" + cumulative tokens
 const sidecarHistory = {};
@@ -769,8 +941,19 @@ function updateSidecarTable(tenants) {
     const dotClass = t.state === 'busy' ? 'busy' : t.state === 'idle' || t.state === 'running' ? 'up' : 'cold';
     const ttft = h.lastTtft ? `${h.lastTtft}ms` : '—';
     const tok = h.totalTokens > 0 ? (h.totalTokens/1e6).toFixed(2)+'M' : '—';
+    // Framework markers: keep-warm star + governed pill live on the name line; device/
+    // model-menu/mem chips sit on a second line so the table stays scannable.
+    const warm = t.keep_warm ? `<span class="badge-warm" title="keep-warm">★</span>` : '';
+    const gov = t.governed ? `<span class="chip-governed" title="governed lifecycle (auto-heal eligible)">gov</span>` : '';
+    const device = t.device ? `<span class="chip-device">${t.device}</span>` : '';
+    const models = (Array.isArray(t.available_models) && t.available_models.length)
+      ? `<span class="chip-models" title="${t.available_models.join(', ')}">×${t.available_models.length}${t.model ? ' · ' + String(t.model).split('/').pop() : ''}</span>`
+      : '';
+    const mem = `<span class="chip-mem" title="resident memory (governor-reported)">${(Number(t.mem_gb) || 0).toFixed(1)}G</span>`;
     return `<tr>
-      <td>${t.name}</td>
+      <td>${t.name}${warm}${gov}
+        <div style="margin-top:2px">${device}${models}${mem}</div>
+      </td>
       <td><span class="sdot ${dotClass}"></span></td>
       <td class="muted">${sinceStr}</td>
       <td>${ttft}</td>
@@ -779,24 +962,73 @@ function updateSidecarTable(tenants) {
   }).join('');
 }
 
-// Track telemetry into sidecar history
+// Track telemetry into sidecar history. Field names match the governor's real
+// /telemetry shape: recent_calls carry `backend`/`model` (NOT `engine`), `eval_tokens`
+// (output tokens) and `ttft_ms`; recent_synths carry `engine` + `chars`.
 function absorbTelemetry(telemetry) {
   if (!telemetry) return;
   (telemetry.recent_calls || []).forEach(c => {
-    const h = sidecarHistory[c.engine];
+    // a call maps to a sidecar row only when its backend/model IS a tracked sidecar
+    // (e.g. llamacpp, mlxlm); plain ollama calls have no sidecar row and are skipped.
+    const key = c.backend || c.model;
+    const h = key && sidecarHistory[key];
     if (h) {
-      h.totalTokens += c.output_tokens || 0;
-      if (c.latency_s) h.lastTtft = Math.round(c.latency_s * 1000);
+      h.totalTokens += Number(c.eval_tokens) || 0;
+      if (c.ttft_ms) h.lastTtft = Math.round(Number(c.ttft_ms));
     }
   });
   (telemetry.recent_synths || []).forEach(s => {
     const h = sidecarHistory[s.engine];
-    if (h) h.totalTokens += s.chars || 0;
+    if (h) h.totalTokens += Number(s.chars) || 0;
   });
 }
 
-// Known loaded memory footprint per sidecar (when warm/busy — from model sizes)
-const SIDECAR_MEM = { omnivoice: 12.0, kokoro: 4.0, dia: 8.0, whisper: 2.0, llamacpp: 8.0, fastmlx: 8.0, mlxlm: 8.0, comfyui: 12.0, colpali: 6.0 };
+
+// Atelier Framework panel — the governor's constitution (3 laws + auto-heal policy)
+// + recent auto-heal events. Laws/thresholds are near-static (render once); the event
+// list refreshes every poll. All fields are read defensively — the governor's event
+// shape isn't pinned down yet, so fall back across a few plausible key names rather
+// than assume one and throw on the others.
+let _fwLawsRendered = false;
+function renderFramework(pressure) {
+  const lawsEl = document.getElementById('fwLaws');
+  const autohealEl = document.getElementById('fwAutoheal');
+  const badgeEl = document.getElementById('fwAutohealBadge');
+  const evtsEl = document.getElementById('fwAutohealEvents');
+  if (!lawsEl || !autohealEl || !evtsEl) return;
+
+  const c = pressure?.constitution;
+  if (c) {
+    if (!_fwLawsRendered && Array.isArray(c.laws) && c.laws.length) {
+      lawsEl.innerHTML = c.laws.map(l => `<li>${l}</li>`).join('');
+      _fwLawsRendered = true;
+    }
+    const ah = c.autoheal || {};
+    const enabledTag = ah.enabled
+      ? '<span style="color:var(--up)">●</span> enabled'
+      : '<span style="color:var(--text-3)">●</span> disabled';
+    autohealEl.innerHTML = `${enabledTag} · floor ${(+ah.floor_gb || 0).toFixed(1)}G · grace ${(+ah.grace_s || 0).toFixed(0)}s` +
+      `<br><span style="color:var(--text-3)">warn ${(+c.warn_gb || 0).toFixed(0)}G · cliff ${(+c.cliff_gb || 0).toFixed(0)}G</span>`;
+  } else if (!_fwLawsRendered) {
+    lawsEl.innerHTML = '<li class="route-empty" style="list-style:none;margin-left:-14px">constitution unavailable</li>';
+    autohealEl.textContent = '—';
+  }
+
+  const events = Array.isArray(pressure?.autoheal) ? pressure.autoheal : [];
+  if (badgeEl) badgeEl.textContent = events.length ? `${events.length} evt${events.length === 1 ? '' : 's'}` : '—';
+  if (!events.length) {
+    evtsEl.innerHTML = '<div class="route-empty">no auto-heals recorded</div>';
+  } else {
+    evtsEl.innerHTML = events.slice(-6).reverse().map(e => {
+      const name = e?.name ?? e?.sidecar ?? e?.tenant ?? 'sidecar';
+      const held = e?.held_gb ?? e?.gb ?? e?.floor_gb;
+      const heldStr = (held != null && Number.isFinite(Number(held))) ? ` (held ${Number(held).toFixed(1)}G)` : '';
+      const when = e?.at ?? (e?.ts ? new Date(Number(e.ts) * 1000).toTimeString().slice(0,8) : '');
+      return `<div class="route-r-item"><span>auto-healed ${name}${heldStr}</span>` +
+        `<span style="color:var(--text-3)">${when}</span></div>`;
+    }).join('');
+  }
+}
 
 // Routing control tower — admission-gate budget + per-backend load + queue + routing.
 // Fetches the governor's /budget directly (CSP is null). Degrades gracefully: if /budget
@@ -897,13 +1129,30 @@ async function refreshAll() {
     const base = pressure.baseline_gb
       ?? Math.max(0, gb - (pressure.committed_gb ?? 0));
     _lastTop = pressure.top_procs ?? _lastTop;   // residents clue for the baseline tooltip
+    const llm = Math.max(0, gb - (+base));
     memRing.push(+gb.toFixed(1));       if (memRing.length > 60) memRing.shift();
     baseRing.push(+(+base).toFixed(1)); if (baseRing.length > 60) baseRing.shift();
+    // Per-point rich-card meta, snapshotting the top procs at THIS sample (kept aligned with memRing)
+    memMetaRing.push({
+      name:'system memory', kind:'MEM', source:'governor /pressure', hint:'',
+      rows: [
+        ['sampled', new Date().toTimeString().slice(0,8)],
+        ['baseline (macOS+apps)', (+base).toFixed(1)+' GB'],
+        ['LLM load', llm.toFixed(1)+' GB'],
+        ['resident (live)', gb.toFixed(1)+' GB'],
+        ['level', pressure.level],
+      ],
+      list: (_lastTop && _lastTop.length)
+        ? { title:'in the baseline', items:_lastTop.slice(0,5).map(p=>`${p.name} · ${(+p.gb).toFixed(1)} GB`) }
+        : null,
+    });
+    if (memMetaRing.length > 60) memMetaRing.shift();
     const mc = Chart.getChart('memChart');
     if (mc) {
       mc.data.datasets[0].data = [...baseRing];   // baseline band
       mc.data.datasets[1].data = [...memRing];    // resident (top edge); gap = LLM load
       mc.data.labels = memRing.map((_,i)=>i);
+      mc._pointMeta = [...memMetaRing];           // rich hover card per sample
       mc.update('none');
     }
     const nr = document.querySelector('.big-readout .n');
@@ -914,11 +1163,15 @@ async function refreshAll() {
   // -- Build unified tenant list: governor tenants + Ollama always shown --
   const govTenants = pressure?.tenants ?? [];
 
-  // Enrich atelier sidecars with known mem footprint when warm/busy
-  let enriched = govTenants.map(t => ({
-    ...t,
-    mem_gb: t.mem_gb ?? (t.state !== 'cold' ? (SIDECAR_MEM[t.name] ?? 0) : 0),
-  }));
+  // TRUST the governor's mem_gb verbatim — it now ALWAYS emits a numeric value (0 for
+  // an unmeasured/unreachable sidecar, never null/absent). We only coerce to a finite
+  // number (→ 0 if somehow still missing) so sums / donut segments / sort can't NaN.
+  // NO fabricated fallback table — an unreachable sidecar (e.g. fastmlx) shows real 0,
+  // not a made-up footprint.
+  let enriched = govTenants.map(t => {
+    const coerced = Number(t.mem_gb);
+    return { ...t, mem_gb: Number.isFinite(coerced) ? coerced : 0 };
+  });
 
   // Add Ollama from /api/ps (always, even when empty)
   // Ollama models already come from the governor's /pressure tenants (in `enriched`).
@@ -976,28 +1229,54 @@ async function refreshAll() {
   // charted only tenants and called everything else "free", so ~20GB of real usage
   // hid inside an overstated "free" wedge with no identifier. Always redraws (even with
   // nothing loaded) so it can't go stale and leave a phantom segment painted on.
-  const loaded = enriched.filter(t => t.mem_gb > 0);
+  const loaded = enriched.filter(t => Number.isFinite(t.mem_gb) && t.mem_gb > 0);
   const pc = Chart.getChart('pieChart');
   const PALETTE = ['#C8A96E','#6E86C8','#A98B5C','#5FA86B','#C99A52','#9B6EC8','#D9C091','#63A0A8'];
   const FREE_COLOR = '#26251F';
   const OTHER_COLOR = '#454751';   // slate grey — deliberately NOT a tenant colour
+  const NODATA_COLOR = '#2a2a26';  // distinct "no data" grey — never render a literal blank ring
   if (pc) {
-    const residentGb = pressure?.resident_gb ?? 0;
-    const freeGb = Math.max(0, pressure?.free_gb ?? 0);
-    const tenantSum = loaded.reduce((a,t)=>a+(t.mem_gb||0),0);
-    // Real usage not attributable to any Atelier tenant. Floor at 0 (estimates can drift).
-    const other = Math.max(0, residentGb - tenantSum);
-    const segs = loaded.map((t,i) => ({ name: t.name, gb: t.mem_gb, c: PALETTE[i % PALETTE.length] }));
-    if (other > 0.3) segs.push({ name: 'system / other', gb: other, c: OTHER_COLOR });
-    segs.push({ name: 'free', gb: freeGb, c: FREE_COLOR });
-    pc.data.datasets[0].data = segs.map(s => +(s.gb||0).toFixed(1));
-    pc.data.labels = segs.map(s => s.name);
-    pc.data.datasets[0].backgroundColor = segs.map(s => s.c);
-    pc.update('none');
-    const legendEl = document.getElementById('pieLegend');
-    if (legendEl) legendEl.innerHTML = segs.map(r =>
-      `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
+    // Defensive: this whole block used to run unguarded — if any upstream field ever
+    // came back non-finite (e.g. before the Rust `mem_gb: Option<f64>` fix, a governor
+    // `"mem_gb": null` failed the WHOLE Tauri `get_pressure` deserialize and silently
+    // fell back to a zeroed PressureResponse), every arithmetic path below still
+    // produced a *valid* number (0), so the donut got exactly one zero-value "free"
+    // segment — which Chart.js draws as literally nothing. Coercing + filtering here,
+    // plus the explicit "no data" fallback segment, means a bad poll is now visible
+    // as a grey ring instead of an invisible one.
+    try {
+      const residentGb = Number(pressure?.resident_gb) || 0;
+      const freeGb = Math.max(0, Number(pressure?.free_gb) || 0);
+      const tenantSum = loaded.reduce((a,t)=>a+(Number(t.mem_gb)||0),0);
+      // Real usage not attributable to any Atelier tenant. Floor at 0 (estimates can drift).
+      const other = Math.max(0, residentGb - tenantSum);
+      const segs = loaded
+        .map((t,i) => ({ name: t.name, gb: Number(t.mem_gb), c: PALETTE[i % PALETTE.length] }))
+        .filter(s => Number.isFinite(s.gb) && s.gb > 0);
+      if (Number.isFinite(other) && other > 0.3) segs.push({ name: 'system / other', gb: other, c: OTHER_COLOR });
+      if (Number.isFinite(freeGb) && freeGb > 0) segs.push({ name: 'free', gb: freeGb, c: FREE_COLOR });
+      if (!segs.length) segs.push({ name: 'no data', gb: 1, c: NODATA_COLOR });
+      pc.data.datasets[0].data = segs.map(s => +(s.gb||0).toFixed(1));
+      pc.data.labels = segs.map(s => s.name);
+      pc.data.datasets[0].backgroundColor = segs.map(s => s.c);
+      // ORDER MATTERS. The donut's width is panel-minus-legend, and the legend is
+      // rebuilt with new names/GB values on EVERY poll — so it changes width. Updating
+      // the chart first laid the ring out against the OLD legend width, and nothing ever
+      // re-laid it out (the panel's own box never changed, so the panel ResizeObserver
+      // stayed silent). Write the legend first, let it reflow, THEN size the ring to
+      // what's actually left.
+      const legendEl = document.getElementById('pieLegend');
+      if (legendEl) legendEl.innerHTML = segs.map(r =>
+        `<div class="lg-row"><span class="lg-sw" style="background:${r.c}"></span>${r.name}<span class="gb">${(r.gb??0).toFixed(0)}GB</span></div>`).join('');
+      fitChart(pc);          // measure the wrap AFTER the legend reflow
+      pc.update('none');
+    } catch (e) {
+      console.warn('pieChart update failed:', e?.message || e);
+    }
   }
+
+  // -- Atelier Framework (constitution + auto-heal) --
+  renderFramework(pressure);
 
   // -- Routing control tower --
   renderRouting(pressure, telemetry);
@@ -1007,14 +1286,21 @@ async function refreshAll() {
 
   // -- Call latency chart: total_duration from log (ms) — best proxy for TTFT we have from logs --
   const ttftChart = Chart.getChart('ttftChart');
-  const callLatencies = (logMetrics ?? [])
+  const callEntries = (logMetrics ?? [])
     .filter(m => m.source === 'ollama' && m.metric === 'model_call' && m.value > 0)
-    .slice(-20).map(m => +m.value.toFixed(0));
+    .slice(-20);
+  const callLatencies = callEntries.map(m => +m.value.toFixed(0));
   if (ttftChart) {
     ttftChart.data.datasets[0].data = callLatencies;
     ttftChart.data.labels = callLatencies.map((_,i)=>i+1);
     ttftChart.data.datasets[1].data = new Array(Math.max(callLatencies.length,1)).fill(800);
-    fitY(ttftChart, 2.0, 120000);   // peak ~50% down from top; 120s default when empty
+    // Rich per-point card: same meta shape as the task stream so _fmtTaskHover renders it.
+    ttftChart._pointMeta = callEntries.map(c => ({
+      name: `${c.label ?? 'ollama'} · ${(c.path ?? '/api/chat').replace('/api/','')}`,
+      kind:'LLM', backend:'ollama', model:c.label, path:c.path, status:c.status,
+      dur: c.value > 60000 ? (c.value/60000).toFixed(1)+'m' : c.value > 1000 ? (c.value/1000).toFixed(1)+'s' : Math.round(c.value)+'ms',
+      ts: c.ts, source:'log tail', hint:'' }));
+    fitY(ttftChart, 2.0, 120000, 30000);   // peak ~50% down from top; 120s default when empty; never below 30s floor
     ttftChart.update('none');
   }
 
@@ -1024,44 +1310,54 @@ async function refreshAll() {
 
   // Best source: governor's ollama_perf (real eval_count/eval_duration from response body)
   const perf = telemetry?.ollama_perf;
+  // Rolling buffer helper: keep a data ring AND a parallel meta ring in lockstep so each
+  // chart point carries the full call detail for its rich hover card.
+  const pushRing = (chart, value, meta, warn) => {
+    if (!chart._atelierRing) { chart._atelierRing = []; chart._metaRing = []; }
+    chart._atelierRing.push(value); chart._metaRing.push(meta);
+    if (chart._atelierRing.length > 20) { chart._atelierRing.shift(); chart._metaRing.shift(); }
+    chart.data.datasets[0].data = [...chart._atelierRing];
+    chart.data.labels = chart._atelierRing.map((_,i)=>i+1);
+    chart.data.datasets[1].data = new Array(chart._atelierRing.length).fill(warn);
+    chart._pointMeta = [...chart._metaRing];
+  };
   if (perf?.tok_s && tpsChart) {
-    // Push into a rolling buffer stored on the chart
-    if (!tpsChart._atelierRing) tpsChart._atelierRing = [];
-    tpsChart._atelierRing.push(perf.tok_s);
-    if (tpsChart._atelierRing.length > 20) tpsChart._atelierRing.shift();
-    tpsChart.data.datasets[0].data = [...tpsChart._atelierRing];
-    tpsChart.data.labels = tpsChart._atelierRing.map((_,i)=>i+1);
-    tpsChart.data.datasets[1].data = new Array(tpsChart._atelierRing.length).fill(30);
+    pushRing(tpsChart, perf.tok_s, {
+      name: `${perf.model ?? 'ollama'} · live`, kind:'perf', backend:'ollama', model:perf.model,
+      tok_s:perf.tok_s, ttft_ms:perf.ttft_ms, eval_tokens:perf.eval_tokens, in_tok:perf.in_tok,
+      value:+(+perf.tok_s).toFixed(1), unit:'tok/s', source:'ollama_perf (live)', hint:'' }, 30);
     fitY(tpsChart);
     tpsChart.update('none');
   }
   if (perf?.ttft_ms && ttftChart2) {
-    if (!ttftChart2._atelierRing) ttftChart2._atelierRing = [];
-    ttftChart2._atelierRing.push(perf.ttft_ms);
-    if (ttftChart2._atelierRing.length > 20) ttftChart2._atelierRing.shift();
-    ttftChart2.data.datasets[0].data = [...ttftChart2._atelierRing];
-    ttftChart2.data.labels = ttftChart2._atelierRing.map((_,i)=>i+1);
-    ttftChart2.data.datasets[1].data = new Array(ttftChart2._atelierRing.length).fill(800);
-    fitY(ttftChart2, 2.0, 120000);   // match the latency chart: peak ~50% down, 120s empty default
+    pushRing(ttftChart2, perf.ttft_ms, {
+      name: `${perf.model ?? 'ollama'} · live`, kind:'LLM', backend:'ollama', model:perf.model,
+      ttft_ms:perf.ttft_ms, tok_s:perf.tok_s, eval_tokens:perf.eval_tokens, in_tok:perf.in_tok,
+      dur: perf.ttft_ms > 1000 ? (perf.ttft_ms/1000).toFixed(1)+'s' : Math.round(perf.ttft_ms)+'ms',
+      source:'ollama_perf (live)', hint:'' }, 800);
+    fitY(ttftChart2, 2.0, 120000, 30000);   // match the latency chart: peak ~50% down, 120s empty default, 30s floor
     ttftChart2.update('none');
   }
 
   // Fallback: log metrics (tokens_per_sec parsed from Ollama log)
   if (!perf?.tok_s) {
-    const tpsFromLog = (logMetrics ?? []).filter(m => m.source === 'ollama' && m.metric === 'tokens_per_sec').slice(-20).map(m => m.value);
-    if (tpsChart && tpsFromLog.length) {
-      tpsChart.data.datasets[0].data = tpsFromLog;
-      tpsChart.data.labels = tpsFromLog.map((_,i)=>i+1);
-      tpsChart.data.datasets[1].data = new Array(tpsFromLog.length).fill(30);
+    const tpsLog = (logMetrics ?? []).filter(m => m.source === 'ollama' && m.metric === 'tokens_per_sec').slice(-20);
+    if (tpsChart && tpsLog.length) {
+      tpsChart.data.datasets[0].data = tpsLog.map(m => m.value);
+      tpsChart.data.labels = tpsLog.map((_,i)=>i+1);
+      tpsChart.data.datasets[1].data = new Array(tpsLog.length).fill(30);
+      tpsChart._pointMeta = tpsLog.map(m => ({ name:`${m.label ?? 'ollama'} · tok/s`, kind:'perf',
+        model:m.label, value:+(+m.value).toFixed(1), unit:'tok/s', ts:m.ts, source:'log tail', hint:'' }));
       tpsChart.update('none');
     } else if (tpsChart && stats?.stats?.length) {
       // Last resort: predictor historical avg_rate
       const llmStats = stats.stats.filter(s => s.kind === 'llm' && s.avg_rate > 1);
       if (llmStats.length) {
-        const rates = llmStats.map(s => s.avg_rate);
-        tpsChart.data.datasets[0].data = rates;
+        tpsChart.data.datasets[0].data = llmStats.map(s => s.avg_rate);
         tpsChart.data.labels = llmStats.map(s => s.model.split(':')[0]);
-        tpsChart.data.datasets[1].data = new Array(rates.length).fill(30);
+        tpsChart.data.datasets[1].data = new Array(llmStats.length).fill(30);
+        tpsChart._pointMeta = llmStats.map(s => ({ name:`${s.model} · avg`, kind:'perf', model:s.model,
+          value:+(+s.avg_rate).toFixed(1), unit:'tok/s', source:'predictor (historical)', hint:'' }));
         tpsChart.update('none');
       }
     }
@@ -1112,7 +1408,9 @@ async function refreshAll() {
     dur: (typeof c.latency === 'string' ? c.latency.replace(/(\.\d{2})\d+/, '$1') : '—'),
     meta: { kind:'LLM', backend:c.backend ?? 'ollama', model:c.model, path:c.path, status:c.status,
             latency:c.latency, tok_s:c.tok_s, ttft_ms:c.ttft_ms, eval_tokens:c.eval_tokens ?? c.out_tok,
-            in_tok:c.in_tok ?? c.prompt_tokens, num_ctx:c.num_ctx, est_gb:c.est_gb, prompt:c.prompt, source:'governor' },
+            in_tok:c.in_tok ?? c.prompt_tokens, num_ctx:c.num_ctx, est_gb:c.est_gb,
+            prompt:c.prompt, output:c.output, client:c.client, capture_note:c.capture_note,
+            via:c.via, origin:c.origin, origin_detail:c.origin_detail, source:'governor' },
   }));
   const _seen = new Set();
   const allRows = [...modelCallRows, ...govCallRows, ...synthRows]
@@ -1120,19 +1418,53 @@ async function refreshAll() {
                    if (_seen.has(k)) return false; _seen.add(k); return true; })
     .sort((a,b)=>b.ts-a.ts).slice(0,11);
   const tbody = document.getElementById('taskRows');
-  window._taskMeta = allRows.map(r => ({ ...r.meta, name:r.name, dur:r.dur, st:r.st, ts:r.ts }));
-  if (tbody && allRows.length) tbody.innerHTML = allRows.map((r,i) => {
-    const t = new Date(r.ts); const tstr = t.toTimeString().slice(0,8);
-    return `<tr data-task="${i}"><td>${r.name}</td><td class="muted">${tstr}</td><td>${r.dur}</td><td><span class="pill ${r.st}">${r.st}</span></td></tr>`;
-  }).join('');
+  // Rows and their meta MUST be replaced together. Updating _taskMeta unconditionally
+  // while only re-rendering rows when non-empty let one empty poll (a governor restart,
+  // a timed-out fetch) blank the meta while the old rows stayed on screen — after which
+  // every hover and click looked up _taskMeta[i] === undefined and silently did nothing.
+  // The stream looked fine and was completely dead. Empty poll => keep the last good view.
+  if (tbody && allRows.length) {
+    window._taskMeta = allRows.map(r => ({ ...r.meta, name:r.name, dur:r.dur, st:r.st, ts:r.ts }));
+    tbody.innerHTML = allRows.map((r,i) => {
+      const t = new Date(r.ts); const tstr = t.toTimeString().slice(0,8);
+      // The origin line is the join back to the agent's own logs — without it a LAN row
+      // is anonymous and can only be matched to a task by comparing clocks.
+      const org = r.meta?.origin
+        ? `<span class="origin">${String(r.meta.origin).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</span>` : '';
+      return `<tr data-task="${i}"><td>${r.name}${org}</td><td class="muted">${tstr}</td><td>${r.dur}</td><td><span class="pill ${r.st}">${r.st}</span></td></tr>`;
+    }).join('');
+    applyTaskFilter();          // a refresh must not silently drop the active filter
+  }
 }
+
+// ---- Task-stream filter: matches origin, model, client, and the captured text ----
+function applyTaskFilter(){
+  const box = document.getElementById('taskFilter');
+  const q = (box?.value || '').trim().toLowerCase();
+  const meta = window._taskMeta || [];
+  let shown = 0;
+  document.querySelectorAll('tr[data-task]').forEach(tr => {
+    const m = meta[+tr.dataset.task] || {};
+    const hay = [m.name, m.origin, m.model, m.backend, m.client, m.via, m.prompt, m.output,
+                 m.origin_detail && m.origin_detail.caller_ip]
+      .map(x => String(x || '')).join(' ').toLowerCase();
+    const hit = !q || hay.includes(q);
+    tr.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  if (box) box.title = q ? `${shown} of ${meta.length} rows match "${q}"`
+                         : 'Filters rows on origin, model, client, prompt and reply text';
+}
+document.addEventListener('input', e => {
+  if (e.target && e.target.id === 'taskFilter') applyTaskFilter();
+});
 
 // ---- Task hover card: full per-call detail (prompt + tokens land with the proxy) ----
 function _fmtTaskHover(m){
   const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   const row = (k,v) => (v===undefined||v===null||v==='') ? '' : `<div class="thr"><span>${k}</span><b>${esc(v)}</b></div>`;
   const stamp = m.ts ? new Date(m.ts).toTimeString().slice(0,8) : '';
-  let h = `<div class="thh">${esc(m.name||'task')}<span class="thk">${esc(m.kind||'')}</span></div>`;
+  let h = `<div class="thh"><span>${esc(m.name||'task')}</span><span class="thh-r"><span class="thk">${esc(m.kind||'')}</span><span class="thx" title="unpin (Esc)">✕</span></span></div>`;
   h += row('backend', m.backend) + row('model', m.model) + row('path', m.path);
   h += row('status', m.status) + row('started', stamp) + row('duration', m.dur);
   if (m.tok_s)       h += row('tok/s', (+m.tok_s).toFixed(1));
@@ -1143,27 +1475,160 @@ function _fmtTaskHover(m){
   if (m.est_gb)      h += row('memory reserved', m.est_gb + ' GB');
   if (m.chars)       h += row('chars', m.chars);
   if (m.seconds)     h += row('audio seconds', (+m.seconds).toFixed(1));
+  if (m.value != null) h += row(m.unit ? `value (${m.unit})` : 'value', m.value);   // generic chart point
+  if (Array.isArray(m.rows)) for (const [k,v] of m.rows) h += row(k, v);            // custom chart rows
   const promptText = m.prompt || m.text;
-  if (promptText) h += `<div class="thp"><span>prompt</span><div>${esc(String(promptText).slice(0,600))}</div></div>`;
+  if (promptText) h += `<div class="thp"><span>prompt</span><div>${esc(String(promptText).slice(0,4000))}</div></div>`;
   else if (m.kind==='LLM') h += `<div class="thp muted"><span>prompt</span><div>— not captured (enable the capturing proxy to record prompts &amp; in/out tokens)</div></div>`;
-  h += `<div class="ths">source: ${esc(m.source||'?')}</div>`;
+  if (m.list && m.list.items && m.list.items.length)                                // e.g. top procs in the baseline
+    h += `<div class="thp"><span>${esc(m.list.title||'')}</span><div>${m.list.items.map(esc).join('\n')}</div></div>`;
+  const hint = m.hint === undefined ? ' · click to pin · DOUBLE-click for full input/output' : (m.hint ? ' · ' + m.hint : '');
+  h += `<div class="ths">source: ${esc(m.source||'?')}${hint}</div>`;
   return h;
 }
+// ---- Task detail MODAL: double-click a row for the FULL input + output ----
+// The hover card is a peek (clipped, 160px panes). This is the read view: both bodies
+// in full, each independently scrollable, selectable and copyable.
+function _openTaskModal(m){
+  document.getElementById('taskModal')?.remove();
+  const esc = x => String(x).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const back = document.createElement('div');
+  back.id = 'taskModal'; back.className = 'tmodal-back';
+
+  const fact = (k,v) => (v===undefined||v===null||v==='') ? ''
+    : `<div><span>${k}</span><b>${esc(v)}</b></div>`;
+  const stamp = m.ts ? new Date(m.ts).toLocaleString() : '';
+  let facts = fact('backend', m.backend) + fact('model', m.model) + fact('path', m.path)
+            + fact('status', m.status) + fact('started', stamp) + fact('duration', m.dur || m.latency);
+  if (m.in_tok)      facts += fact('input tokens', m.in_tok);
+  if (m.eval_tokens) facts += fact('output tokens', m.eval_tokens);
+  if (m.tok_s)       facts += fact('tok/s', (+m.tok_s).toFixed(1));
+  if (m.ttft_ms)     facts += fact('ttft', m.ttft_ms + ' ms');
+  if (m.num_ctx)     facts += fact('context', m.num_ctx);
+  if (m.est_gb)      facts += fact('reserved', m.est_gb + ' GB');
+  if (m.chars)       facts += fact('chars', m.chars);
+  if (m.seconds)     facts += fact('audio s', (+m.seconds).toFixed(1));
+  // caller_ip is the ONLY record of who connected once traffic is proxied — ollama's own
+  // log then shows 127.0.0.1 for everything, because the governor is the one forwarding.
+  if (m.origin_detail && m.origin_detail.caller_ip)
+                     facts += fact('called from', m.origin_detail.caller_ip);
+  else if (m.client) facts += fact('called from', m.client);
+  if (m.via)         facts += fact('route', m.via);
+  if (m.origin)      facts += fact('origin', m.origin);
+  if (m.origin_detail && typeof m.origin_detail === 'object')
+    Object.entries(m.origin_detail).forEach(([k,v]) => {
+      if (v && k !== 'caller_ip') facts += fact(k, v);   // already shown as "called from"
+    });
+
+  // TTS rows carry the spoken text in `text`; LLM rows carry `prompt`.
+  const input  = m.prompt || m.text || '';
+  const output = m.output || '';
+  // Be explicit about WHY a pane is empty — "nothing here" and "not recorded" are
+  // different problems, and guessing between them is what wasted time before.
+  // A proxied call already WENT through the capturing proxy, so telling the reader to
+  // "enable the capturing proxy" is both wrong and a dead end. Separate the cases.
+  const isEmbed = /embed/i.test(String(m.path || ''));
+  const noIn  = m.capture_note ? 'not captured — ' + m.capture_note
+              : m.kind === 'TTS' ? 'no text recorded for this synth'
+              : m.via === 'proxy' ? (isEmbed
+                  ? 'no text recorded — this embedding call predates input capture for the '
+                    + '`input` field (older entries only; new ones record it)'
+                  : 'went through the proxy but no input text was found in the request body')
+              : m.via === 'reported' ? 'reported by the caller without an input body'
+              : 'not captured — this call did not go through the capturing proxy '
+                + '(POST /llm/{backend}/{path})';
+  const noOut = m.st === 'run' ? 'still running…'
+              : isEmbed ? 'embeddings return vectors, not text — newer entries show the vector '
+                        + 'count and width here'
+              : m.capture_note ? 'not captured — ' + m.capture_note
+              : m.source === 'log tail' ? 'not captured — reconstructed from the ollama log tail, '
+                                        + 'which records timing only. Route through the proxy to capture replies.'
+              : m.kind === 'TTS' ? 'audio output — not text'
+              : 'not captured — this call predates output capture, or bypassed the proxy';
+
+  const sec = (title, body, meta, empty) => `
+    <section class="tm-sec">
+      <h4>${title}<span class="tm-meta">${meta}</span>${body ? '<span class="tm-copy">copy</span>' : ''}</h4>
+      <pre class="${body ? '' : 'empty'}">${esc(body || empty)}</pre>
+    </section>`;
+  const size = t => t ? `${t.length.toLocaleString()} chars` : '';
+
+  back.innerHTML = `
+    <div class="tmodal" role="dialog" aria-modal="true">
+      <header>
+        <span class="tm-title">${esc(m.name || 'task')}</span>
+        <span class="tm-kind">${esc(m.kind || '')}</span>
+        <span class="tm-x" title="close (Esc)">✕</span>
+      </header>
+      <div class="tm-facts">${facts}</div>
+      <div class="tm-body">
+        ${sec('input', input, size(input), noIn)}
+        ${sec('output', output, size(output), noOut)}
+      </div>
+    </div>`;
+
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  back.addEventListener('click', e => { if (e.target === back) close(); });   // backdrop only
+  back.querySelector('.tm-x').addEventListener('click', close);
+  back.querySelectorAll('.tm-copy').forEach((btn, i) => btn.addEventListener('click', () => {
+    navigator.clipboard?.writeText(i === 0 ? input : output)
+      .then(() => { btn.textContent = 'copied'; setTimeout(() => btn.textContent = 'copy', 1200); })
+      .catch(() => { btn.textContent = 'copy failed'; });
+  }));
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(back);
+}
+
 (function _wireTaskHover(){
-  const card = document.createElement('div'); card.id='taskHover'; card.style.display='none';
+  const card = document.createElement('div'); card.id='taskHover'; card.className='richcard'; card.style.display='none';
   document.body.appendChild(card);
-  document.addEventListener('mouseover', e => {
-    const tr = e.target.closest && e.target.closest('tr[data-task]'); if(!tr) return;
-    const m = (window._taskMeta||[])[+tr.dataset.task]; if(!m) return;
-    card.innerHTML = _fmtTaskHover(m); card.style.display='block';
+  let pinned = false;                    // when pinned, the card is frozen + interactive
+
+  const place = tr => {
     const r = tr.getBoundingClientRect();
     const top = Math.min(r.top, window.innerHeight - card.offsetHeight - 12);
     card.style.top = Math.max(8, top) + 'px';
     card.style.left = Math.max(8, r.left - card.offsetWidth - 12) + 'px';
+  };
+  const render = (tr, m) => { card.innerHTML = _fmtTaskHover(m); card.style.display='block'; place(tr); };
+  const unpin = () => { pinned=false; card.classList.remove('pinned'); card.style.display='none'; };
+
+  document.addEventListener('mouseover', e => {
+    if (pinned) return;                  // frozen while pinned — don't let hover swap the content
+    const tr = e.target.closest && e.target.closest('tr[data-task]'); if(!tr) return;
+    const m = (window._taskMeta||[])[+tr.dataset.task]; if(!m) return;
+    render(tr, m);
   });
   document.addEventListener('mouseout', e => {
+    if (pinned) return;
     const tr = e.target.closest && e.target.closest('tr[data-task]');
     if (tr && !tr.contains(e.relatedTarget)) card.style.display='none';
+  });
+  // Click a row to PIN: card stays open + becomes interactive so you can scroll/select/copy the call.
+  document.addEventListener('click', e => {
+    if (e.target.closest && e.target.closest('#taskHover .thx')) { unpin(); return; }  // ✕ closes
+    const tr = e.target.closest && e.target.closest('tr[data-task]');
+    if (tr) {
+      const m = (window._taskMeta||[])[+tr.dataset.task]; if(!m) return;
+      pinned = true; card.classList.add('pinned'); render(tr, m);
+      e.stopPropagation();
+      return;
+    }
+    if (pinned && !(e.target.closest && e.target.closest('#taskHover'))) unpin();       // click outside closes
+  });
+  document.addEventListener('keydown', e => { if (e.key==='Escape' && pinned) unpin(); });
+
+  // DOUBLE-click a row -> the full read view. A dblclick always fires click first, so the
+  // hover card would pin itself behind the modal; drop it on the way through.
+  document.addEventListener('dblclick', e => {
+    const tr = e.target.closest && e.target.closest('tr[data-task]');
+    if (!tr) return;
+    const m = (window._taskMeta||[])[+tr.dataset.task]; if(!m) return;
+    if (pinned) unpin(); else card.style.display = 'none';
+    window.getSelection()?.removeAllRanges();   // dblclick selects the cell text otherwise
+    e.preventDefault();
+    _openTaskModal(m);
   });
 })();
 
@@ -1196,7 +1661,7 @@ setInterval(refreshAll, 2500);
 // ---- Gridstack movable-panel workspace (drag/resize/persist) ----
 (function initLayout() {
   if (typeof GridStack === 'undefined') return;   // graceful if vendor missing
-  const LS_KEY = 'atelier.layout.v3';   // v3: model-based (own source of truth)
+  const LS_KEY = 'atelier.layout.v4';   // v4: 8-panel model (adds routing + framework rows)
   // VIS_ROWS rows fill the viewport (cell height is sized to them, so existing panels
   // keep their size); ROWS is the larger maxRow that lets a 3rd row (routing) live below,
   // reachable by scrolling — see .grid-stack overflow-y:auto.
@@ -1232,9 +1697,15 @@ setInterval(refreshAll, 2500);
   // ===== layout MODEL = single source of truth =====
   // M.rows: [{ h, cols:[{id,w}] }]  — sum(cols.w)=COLS per row, sum(rows.h)=ROWS
   function defaultModel() {
+    // ALL panels must appear here (validModel checks the id set against PANEL_IDS).
+    // routing-panel + framework-panel were previously NOT modeled — they rendered only
+    // from their HTML gs-* attrs, so validModel() could never match the DOM's 8 panels
+    // and EVERY saved layout was discarded on restart (the "panels jump" bug). row3
+    // (h5) lives below the fold and is reachable by scrolling (.grid-stack overflow-y).
     return { rows: [
       { h: 6, cols: [{ id: 'memory-panel', w: 4 }, { id: 'tenants-panel', w: 4 }, { id: 'tasks-panel', w: 4 }] },
       { h: 6, cols: [{ id: 'hud-pie', w: 4 }, { id: 'hud-lines', w: 4 }, { id: 'hud-status', w: 4 }] },
+      { h: 5, cols: [{ id: 'routing-panel', w: 8 }, { id: 'framework-panel', w: 4 }] },
     ] };
   }
   function validModel(m) {
@@ -1247,7 +1718,7 @@ setInterval(refreshAll, 2500);
 
   const resizeCharts = (el) =>
     (el ? [el] : document.querySelectorAll('.grid-stack-item')).forEach(it =>
-      it.querySelectorAll('canvas').forEach(c => window.Chart?.getChart?.(c)?.resize()));
+      it.querySelectorAll('canvas').forEach(c => fitChart(window.Chart?.getChart?.(c))));
   const tauriInvoke = (cmd, args) => {
     const inv = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke ?? window.__TAURI_INTERNALS__?.invoke;
     try { return inv ? inv(cmd, args) : null; } catch (_) { return null; }
@@ -1263,13 +1734,18 @@ setInterval(refreshAll, 2500);
     M.rows = M.rows.filter(r => r.cols && r.cols.length);   // drop empty rows
     if (!M.rows.length) M = defaultModel();
     const nR = M.rows.length;
-    let hbase = Math.floor(ROWS / nR), hrem = ROWS - hbase * nR;
-    M.rows.forEach(r => {
-      const hsum = r.h || 0;
-      if (M.rows.length !== 2 || hsum < MIN_ROW || hsum > ROWS - MIN_ROW) { r.h = hbase + (hrem > 0 ? 1 : 0); if (hrem > 0) hrem--; }
-    });
-    let totH = M.rows.reduce((s, r) => s + r.h, 0);
-    if (totH !== ROWS) M.rows[M.rows.length - 1].h += (ROWS - totH);
+    // Keep the saved per-row heights if they're already valid (each within [MIN_ROW,
+    // ROWS-MIN_ROW] and summing to ROWS) — only equalize when the set is broken. The
+    // old code hard-reset heights unless there were EXACTLY 2 rows, which erased any
+    // persisted 3-row height layout on every load.
+    const totH0 = M.rows.reduce((s, r) => s + (r.h || 0), 0);
+    const heightsValid = totH0 === ROWS && M.rows.every(r => r.h >= MIN_ROW && r.h <= ROWS - MIN_ROW);
+    if (!heightsValid) {
+      let hbase = Math.floor(ROWS / nR), hrem = ROWS - hbase * nR;
+      M.rows.forEach(r => { r.h = hbase + (hrem > 0 ? 1 : 0); if (hrem > 0) hrem--; });
+      let totH = M.rows.reduce((s, r) => s + r.h, 0);
+      if (totH !== ROWS) M.rows[M.rows.length - 1].h += (ROWS - totH);
+    }
     M.rows.forEach(r => {
       const n = r.cols.length;
       const wsum = r.cols.reduce((s, c) => s + (c.w || 0), 0);
@@ -1287,7 +1763,7 @@ setInterval(refreshAll, 2500);
     M.rows.forEach(r => { let x = 0; r.cols.forEach(c => { layout.push({ id: c.id, x, y, w: c.w, h: r.h }); x += c.w; }); y += r.h; });
     _busy = true; grid.load(layout); _busy = false;
     saveModel();
-    requestAnimationFrame(() => { resizeCharts(); rebuildGutters(); });
+    requestAnimationFrame(() => { observeChartHosts(); resizeCharts(); rebuildGutters(); });
     setTimeout(() => { resizeCharts(); rebuildGutters(); }, 90);   // settle fallback
   }
 
@@ -1307,8 +1783,12 @@ setInterval(refreshAll, 2500);
   }
   function heightResize(startTopH, dRows) {
     if (M.rows.length < 2) return;
-    const topH = Math.max(MIN_ROW, Math.min(ROWS - MIN_ROW, startTopH + dRows));
-    M.rows[0].h = topH; M.rows[1].h = ROWS - topH;
+    // The horizontal seam sits between row 0 and row 1; rebalance only those two and
+    // keep their COMBINED height constant so any rows below (routing/framework) are
+    // untouched and the total still equals ROWS (works for 2 or 3+ rows).
+    const combined = M.rows[0].h + M.rows[1].h;
+    const topH = Math.max(MIN_ROW, Math.min(combined - MIN_ROW, startTopH + dRows));
+    M.rows[0].h = topH; M.rows[1].h = combined - topH;
     render();
   }
 
@@ -1434,7 +1914,37 @@ setInterval(refreshAll, 2500);
   resetBtn.addEventListener('click', () => { M = defaultModel(); render(); });
 
   const fitHeight = () => grid.cellHeight(cellH());
-  window.addEventListener('resize', () => { fitHeight(); resizeCharts(); requestAnimationFrame(rebuildGutters); });
+
+  // ===== resize → redraw plumbing (all size changes converge here, debounced) =====
+  // Re-fit the latency y-axis on any resize so the 30s floor / adaptive max recompute.
+  const refitLatency = () => {
+    const tt = window.Chart?.getChart?.('ttftChart');
+    if (tt) { fitY(tt, 2.0, 120000, 30000); tt.update('none'); }
+  };
+  let _resizeRaf = 0;
+  const scheduleResize = () => {
+    if (_resizeRaf) return;
+    _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; resizeCharts(); refitLatency(); });
+  };
+  // ResizeObserver: the reliable signal — fires when ANY panel content-box changes
+  // size (panel drag-resize, seam-gutter resize, layout swap/insert) even when there
+  // is NO window 'resize' event. Chart.js's own responsive listener only catches the
+  // window, so this is what stops the clip-on-panel-resize.
+  const _chartRO = new ResizeObserver(scheduleResize);
+  // Observe BOTH the panel box AND every chart's own container. Panel-only observation
+  // misses a wrap that changes size inside an unchanged panel — exactly the donut, whose
+  // width is panel-minus-legend and whose legend is rewritten on every poll. observe() on
+  // an already-observed element is a no-op, so this is safe to re-run after any re-render.
+  const observeChartHosts = () => {
+    document.querySelectorAll('.grid-stack-item-content').forEach(el => _chartRO.observe(el));
+    document.querySelectorAll('canvas').forEach(c =>
+      c.parentElement && _chartRO.observe(c.parentElement));
+  };
+  observeChartHosts();
+  // Gridstack change/resizestop are a belt-and-suspenders trigger for the same redraw.
+  grid.on('resizestop', () => { scheduleResize(); rebuildGutters(); });
+  grid.on('change', scheduleResize);
+  window.addEventListener('resize', () => { fitHeight(); scheduleResize(); requestAnimationFrame(rebuildGutters); });
 
   render();                              // instant paint from localStorage/default
   // Durable restore: pull the saved layout from the on-disk file (survives quit)

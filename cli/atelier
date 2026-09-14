@@ -9,6 +9,16 @@ and prints what's available + how to call it. No dependencies (stdlib only).
   atelier discover --json     # raw manifest JSON (for piping/jq)
   atelier discover --plain    # no colour
 
+`atelier ps` answers "what is loaded RIGHT NOW" from the process table — the only
+honest source. /api/ps and /readyz are self-reports and can be wrong (a mid-load,
+orphaned, or wedged runner holds GB while its API says "nothing loaded"); those rows
+are marked `!` so a full machine is never a mystery again.
+
+  atelier ps                  # every memory holder, model named, untracked ones flagged
+  atelier unload <owner>      # free it — sidecar name, ollama:<model>, or pid:<n>
+  atelier unload <owner> --force   # preempt a BUSY sidecar
+  atelier unload pid:<n> --yes     # confirm killing an orphan runner
+
 Env: ATELIER_GOVERNOR_URL (default http://127.0.0.1:8799)
 """
 import argparse
@@ -127,6 +137,91 @@ def discover(args):
         print()
 
 
+def _post(path, payload, timeout=40):
+    req = urllib.request.Request(f"{GOV}{path}", method="POST",
+                                 data=json.dumps(payload).encode(),
+                                 headers={"content-type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def red(s):    return _c(s, "31")
+def yellow(s): return _c(s, "33")
+
+
+def ps(args):
+    """What is ACTUALLY holding memory — process truth, not API self-report."""
+    try:
+        d = _get("/inventory", timeout=25)
+    except Exception as e:
+        sys.exit(f"✗ governor unreachable at {GOV} ({e})")
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return
+
+    lvl = red if d["resident_gb"] >= 55 else yellow if d["resident_gb"] >= 45 else green
+    print(f"\n{bold('memory')}  {lvl(str(d['resident_gb']) + ' GB resident')}  "
+          f"{dim('·')}  {d['free_gb']} GB free  {dim('·')}  swapouts {d['swapouts']}")
+    print(dim(f"  {d['attributed_gb']} GB in models  ·  {d['other_gb']} GB apps/OS/kernel") + "\n")
+
+    holders = d.get("holders") or []
+    if not holders:
+        print(dim("  nothing loaded."))
+    else:
+        print(f"      {bold('GB')}     {bold('OWNER'):<14} {bold('STATE'):<8} {bold('MODEL')}")
+        for h in holders:
+            mark = {"process-only": red("!"), "api-only": yellow("?")}.get(h["tracked"], " ")
+            state = h["state"]
+            st = red(state) if h.get("busy") else cyan(state)
+            pad = " " * max(0, 8 - len(state))
+            warm = gold(" warm") if h.get("keep_warm") else ""
+            model = str(h.get("model") or "—")[:52]
+            idle = h.get("idle_s")
+            age = dim(f"  idle {int(idle // 60)}m") if isinstance(idle, (int, float)) else ""
+            print(f"  {h['gb'] or 0:>6.2f} {mark}  {green(h['owner']):<14} {st}{pad} {dim(model)}{warm}{age}")
+            if h.get("note"):
+                print(f"           {yellow('↳ ' + h['note'])}")
+            # A model sitting warm past the ceiling must show WHY, or that it's on borrowed time.
+            ceiling = (d.get('max_idle') or {}).get('ceiling_s')
+            if ceiling and isinstance(idle, (int, float)) and idle > ceiling:
+                if h.get("exempt_reason"):
+                    print(f"           {green('↳ exempt:')} {dim(h['exempt_reason'])}")
+                else:
+                    print(f"           {yellow('↳ past the ' + str(int(ceiling // 60)) + 'm idle ceiling — governor will evict')}")
+
+    if d.get("flagged"):
+        print(f"\n{bold(red('UNTRACKED — memory held that no API admits to'))}")
+        for f in d["flagged"]:
+            print(f"  {f['gb']} GB  {f['owner']}  {dim(str(f.get('model') or ''))}  [{f['tracked']}]")
+    print(f"\n{dim('free one:')} atelier unload <owner>"
+          f"{dim('   (also: ollama:<model>, pid:<n>)')}\n")
+
+
+def unload(args):
+    try:
+        r = _post("/unload", {"target": args.target, "force": args.force, "confirm": args.yes})
+    except Exception as e:
+        sys.exit(f"✗ unload failed ({e})")
+    if args.json:
+        print(json.dumps(r, indent=2))
+        return
+    if r.get("phase") == "preview":
+        cmd = f"atelier unload pid:{r['pid']} --yes"
+        print(f"\n{yellow('confirm needed')}  pid {r['pid']} holding {r['gb']} GB")
+        print(f"  {dim(r['process'])}")
+        print(f"  {red(r['effect'])}")
+        print(f"\n  run: {cyan(cmd)}\n")
+        return
+    if not r.get("ok"):
+        print(f"\n{red('✗ ' + str(r.get('error') or r.get('refused')))}")
+        if r.get("hint"):
+            print(f"  {dim(r['hint'])}")
+        print()
+        sys.exit(1)
+    delta = dim(f"free {r['before_gb']} → {r['after_gb']} GB")
+    print(f"\n{green('✓')} unloaded {bold(r['target'])}  {delta}  {gold('+%s GB' % r['freed_gb'])}\n")
+
+
 def main():
     p = argparse.ArgumentParser(prog="atelier", description="Atelier inference-hub CLI")
     sub = p.add_subparsers(dest="cmd")
@@ -135,6 +230,20 @@ def main():
     dp.add_argument("--json", action="store_true", help="raw manifest JSON")
     dp.add_argument("--plain", action="store_true", help="disable colour")
     dp.set_defaults(func=discover)
+
+    pp = sub.add_parser("ps", help="what is ACTUALLY holding memory (process truth)")
+    pp.add_argument("--json", action="store_true", help="raw inventory JSON")
+    pp.add_argument("--plain", action="store_true", help="disable colour")
+    pp.set_defaults(func=ps)
+
+    up = sub.add_parser("unload", help="free one target: <sidecar> | ollama:<model> | pid:<n>")
+    up.add_argument("target")
+    up.add_argument("--force", action="store_true", help="preempt a BUSY sidecar")
+    up.add_argument("--yes", action="store_true", help="confirm a pid: kill")
+    up.add_argument("--json", action="store_true", help="raw JSON")
+    up.add_argument("--plain", action="store_true", help="disable colour")
+    up.set_defaults(func=unload)
+
     args = p.parse_args()
     if args.plain:
         global _USE_COLOR

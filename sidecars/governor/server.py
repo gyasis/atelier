@@ -24,6 +24,9 @@ Exposes (itself observable — no black boxes):
   POST /report          feed a completed run into the predictor
   GET  /benchmark       fire a tiny real generate → measure + record decode tok/s for a model
   GET  /predictor/stats learned per-model compute stats   ·   GET /predictor/export portable dataset
+  GET  /inventory       (h) who ACTUALLY holds memory — process RSS reconciled against every
+                            API self-report; flags anything loaded that no API admits to
+  POST /unload          (h) one door to free a specific target: <sidecar>|ollama:<m>|pid:<n>
   POST /make-room       (b) evict ONLY idle models across both tenants
   POST /force-stop      (c) human-gated two-phase yield negotiation to preempt a BUSY model
   GET  /budget          (e) global LLM memory budget + active leases + wait queue
@@ -36,6 +39,7 @@ import collections
 import json
 import os
 import re
+import socket
 import sqlite3
 import statistics
 import secrets
@@ -61,6 +65,24 @@ OLLAMA_LOG = Path(os.environ.get("OLLAMA_LOG", str(Path.home() / ".ollama/logs/s
 # (d) auto pressure-watcher: on ALARM, auto-run make-room (idle eviction only).
 AUTO_MAKE_ROOM = os.environ.get("ATELIER_AUTO_MAKE_ROOM", "1") not in ("0", "false", "no")
 AUTO_COOLDOWN = float(os.environ.get("ATELIER_AUTO_COOLDOWN", "60"))  # min seconds between auto evictions
+# (g) AUTO-HEAL — Law 1 enforced from OUTSIDE. A sidecar reporting state=cold (model unloaded) that
+# still holds > FLOOR GB is LEAKING; after a grace period, hard-restart it via launchd. The
+# GovernedSidecar framework self-heals first — this backstops anything bespoke / non-self-healing.
+AUTOHEAL = os.environ.get("ATELIER_AUTOHEAL", "1") not in ("0", "false", "no")
+AUTOHEAL_FLOOR_GB = float(os.environ.get("ATELIER_AUTOHEAL_FLOOR_GB", "1.5"))
+AUTOHEAL_GRACE_S = float(os.environ.get("ATELIER_AUTOHEAL_GRACE_S", "150"))
+# (i) HARD IDLE CEILING — nothing stays resident forever, warm tag or not.
+# keep_warm buys warmth DURING a work session; it is not a licence to hold GB for days.
+# Any sidecar with no call in MAX_IDLE_S gets unloaded, and kicked via launchd if the
+# unload doesn't take. The ONLY exemption is an explicit, REASONED entry in the exempt
+# file — a forgotten `KEEP_WARM=true` in a plist is not a justification, so the flag
+# alone buys nothing here. Exemptions are surfaced in /pressure and `atelier ps`, never
+# silent, so a long-lived warm model is always something someone chose and can defend.
+MAX_IDLE_ENFORCE = os.environ.get("ATELIER_MAX_IDLE_ENFORCE", "1") not in ("0", "false", "no")
+MAX_IDLE_S = float(os.environ.get("ATELIER_MAX_IDLE_S", "1800"))          # 30 minutes
+MAX_IDLE_MIN_GB = float(os.environ.get("ATELIER_MAX_IDLE_MIN_GB", "0.3"))  # ignore near-empty
+WARM_EXEMPT_FILE = Path(os.environ.get(
+    "ATELIER_WARM_EXEMPT_FILE", str(Path.home() / ".config/atelier/warm-exempt.json")))
 
 SIDECAR_BASE = {
     "omnivoice": "http://127.0.0.1:8770",
@@ -74,6 +96,11 @@ SIDECAR_BASE = {
     "maisi": "http://127.0.0.1:8775",
     "medner": "http://127.0.0.1:8131",
     "colpali": "http://127.0.0.1:8779",
+    "pronounce": "http://127.0.0.1:8782",
+    "tabfm": "http://127.0.0.1:8781",
+    "rerank": "http://127.0.0.1:8778",
+    "pyannote": "http://127.0.0.1:8767",
+    "audio-llm": "http://127.0.0.1:8768",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -81,10 +108,15 @@ SIDECAR_LOGS = {
     "kokoro": Path.home() / "Library/Logs/kokoro-sidecar.out.log",
     "dia": Path.home() / "Library/Logs/dia-sidecar.out.log",
     "whisper": Path.home() / "Library/Logs/whisper-sidecar.out.log",
+    "pronounce": Path.home() / "Library/Logs/pronounce-sidecar.out.log",
     "radiogen": Path.home() / "Library/Logs/radiogen-sidecar.out.log",
     "maisi": Path.home() / "Library/Logs/maisi-sidecar.out.log",
     "medner": Path.home() / "Library/Logs/medner-sidecar.out.log",
     "colpali": Path.home() / "Library/Logs/colpali-sidecar.out.log",
+    "tabfm": Path.home() / "Library/Logs/tabfm-sidecar.out.log",
+    "rerank": Path.home() / "Library/Logs/rerank-sidecar.out.log",
+    "pyannote": Path.home() / "Library/Logs/pyannote-sidecar.out.log",
+    "audio-llm": Path.home() / "Library/Logs/audio-llm-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -92,6 +124,7 @@ SIDECAR_LABELS = {
     "kokoro": "io.macstudio.hub.kokoro",
     "dia": "io.macstudio.hub.dia",
     "whisper": "io.macstudio.hub.whisper",
+    "pronounce": "io.macstudio.hub.pronounce",
     "llamacpp": "io.macstudio.hub.llamacpp",
     "fastmlx": "io.macstudio.hub.fastmlx",
     "mlxlm": "io.macstudio.hub.mlxlm",
@@ -99,6 +132,10 @@ SIDECAR_LABELS = {
     "maisi": "io.macstudio.hub.maisi",
     "medner": "io.macstudio.hub.medner",
     "colpali": "io.macstudio.hub.colpali",
+    "tabfm": "io.macstudio.hub.tabfm",
+    "rerank": "io.macstudio.hub.rerank",
+    "pyannote": "io.macstudio.hub.pyannote",
+    "audio-llm": "io.macstudio.hub.audio-llm",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
@@ -112,6 +149,9 @@ LLM_DEFAULT_EST_GB = float(os.environ.get("ATELIER_LLM_DEFAULT_EST_GB", "18"))
 # Seed estimates for non-Ollama backends / before /api/tags is cached. Substring match.
 _EST_OVERRIDES = {
     "qwen3-coder-next": 50.0, "deepseek-r1:70b": 43.0,
+    # fastcontext-{rl,sft}: 4B Qwen3 GGUF, alias has no "4b" so the name heuristic
+    # falls to the 18GB blind default → spurious admit-hang. Real resident ~13GB @ 64K ctx.
+    "fastcontext": 13.0,
 }
 LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
 gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,
@@ -127,9 +167,18 @@ _state = {
     "recommendation": None,   # (d) force-stop the agent should surface for human authorization
 }
 _last_auto = 0.0   # (d) cooldown clock for auto make-room
+_cold_heavy_since: dict = {}   # (g) name -> monotonic ts a sidecar first went cold-but-heavy
+_autoheal_log = collections.deque(maxlen=20)   # (g) recent auto-heal restarts (surfaced in /pressure)
+_maxidle_log = collections.deque(maxlen=20)    # (i) recent hard-idle-ceiling evictions
+_warm_exempt: dict = {}                        # (i) name -> {reason, owner, added}
+_warm_exempt_at = 0.0
+_warm_exempt_err: str | None = None
 _recent_calls = collections.deque(maxlen=50)    # Ollama API calls (from ollama log + proxy)
 _proxy_recent = collections.deque(maxlen=50)    # (path, ts) the capturing proxy recorded — dedup vs log tail
 _internal_skip = collections.deque(maxlen=50)   # (path, ts) the governor's OWN probe fired — skip its GIN line
+# How long after a probe marker a matching GIN line is still considered "ours". Must exceed
+# a cold model load, or the probe's own log line is mistaken for user traffic.
+PROBE_SKIP_WINDOW_S = float(os.environ.get("ATELIER_PROBE_SKIP_WINDOW_S", "90"))
 _recent_events = collections.deque(maxlen=50)   # Ollama lifecycle events
 # Durable task history — survives governor restarts (the in-memory deques alone
 # cleared on every restart, so Ollama tasks vanished from the dashboard).
@@ -223,6 +272,254 @@ def _top_procs(procs: list[tuple], n: int = 8) -> list[dict]:
     return out
 
 
+# ---------- (h) HONEST INVENTORY — process ground truth vs API self-report ----------
+# The blind spot this closes: /api/ps and /readyz are SELF-REPORTS. A runner that is
+# mid-load, orphaned, or wedged holds GB of RAM while its API cheerfully says "nothing
+# loaded" — and the only symptom is the machine being full. Ground truth is the process
+# table. /inventory attributes real RSS to an owner, names the model, and states exactly
+# how to free it; anything the APIs disagree with is FLAGGED, never silently dropped.
+INVENTORY_MIN_GB = float(os.environ.get("ATELIER_INVENTORY_MIN_GB", "0.4"))
+OLLAMA_MANIFESTS = Path(os.environ.get(
+    "OLLAMA_MANIFESTS", str(Path.home() / ".ollama/models/manifests")))
+_blob_index: dict[str, str] = {}     # blob sha (hex) -> "model:tag"
+_blob_index_at = 0.0
+
+
+def _ollama_blob_index(max_age_s: float = 300.0) -> dict[str, str]:
+    """Map an Ollama blob sha → 'model:tag' by reading the manifest tree.
+
+    A running `llama-server --model .../blobs/sha256-<hex>` identifies its model ONLY by
+    content hash — useless in a status readout. This is the reverse lookup that turns that
+    hash back into a name, so an untracked runner can still be named (and killed by name).
+    Cached; the manifest tree only changes on pull/rm."""
+    global _blob_index, _blob_index_at
+    if _blob_index and time.time() - _blob_index_at < max_age_s:
+        return _blob_index
+    idx: dict[str, str] = {}
+    try:
+        for mf in OLLAMA_MANIFESTS.rglob("*"):
+            if not mf.is_file():
+                continue
+            parts = mf.relative_to(OLLAMA_MANIFESTS).parts   # <registry>/<ns>/<name>/<tag>
+            if len(parts) < 4:
+                continue
+            ns, name, tag = parts[-3], parts[-2], parts[-1]
+            label = f"{name}:{tag}" if ns == "library" else f"{ns}/{name}:{tag}"
+            try:
+                # `layers` can be absent OR explicitly null in a manifest — one bad file
+                # must not truncate the whole index (it silently did, at 5 of 25 models).
+                layers = json.loads(mf.read_text()).get("layers") or []
+                for lay in layers:
+                    if str(lay.get("mediaType", "")).endswith(".image.model"):
+                        idx[str(lay.get("digest", "")).split(":")[-1]] = label
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[governor] blob index failed: {e}", flush=True)
+    _blob_index, _blob_index_at = idx, time.time()
+    return idx
+
+
+_RUNNER_HINTS = ("llama-server", "ollama runner", "mlx_lm", "mlx-lm", "vllm",
+                 "ComfyUI", "comfy", "llama-cpp", "llama_cpp")
+
+
+def _runner_procs(procs: list[tuple]) -> list[dict]:
+    """Every process that looks like it is HOLDING A MODEL, named where possible.
+
+    Sidecar subtrees are excluded by the caller — this is for runners that belong to no
+    sidecar (Ollama's own llama-server, a hand-started mlx_lm, ComfyUI)."""
+    idx = _ollama_blob_index()
+    out = []
+    for pid, ppid, rss_kb, cmd in procs:
+        if not any(h in cmd for h in _RUNNER_HINTS):
+            continue
+        gb = round(rss_kb / 1048576, 2)
+        if gb < INVENTORY_MIN_GB:
+            continue
+        model = None
+        m = re.search(r"blobs/sha256[-:]([0-9a-f]{12,})", cmd)
+        if m:
+            model = idx.get(m.group(1)) or f"sha256:{m.group(1)[:12]}… (no manifest)"
+        elif (m2 := re.search(r"--model[= ]+(\S+)", cmd)):
+            model = m2.group(1).rsplit("/", 1)[-1]
+        port = None
+        if (m3 := re.search(r"--port[= ]+(\d+)", cmd)):
+            port = int(m3.group(1))
+        kind = ("ollama-runner" if "llama-server" in cmd or "ollama runner" in cmd
+                else "comfyui" if "omfy" in cmd else "runner")
+        out.append({"pid": pid, "ppid": ppid, "gb": gb, "kind": kind,
+                    "model": model, "port": port,
+                    "exe": cmd.split()[0].rsplit("/", 1)[-1]})
+    return out
+
+
+def _sidecar_pid(name: str, procs: list[tuple]) -> int | None:
+    base = SIDECAR_BASE.get(name, "")
+    port = base.rsplit(":", 1)[-1] if ":" in base else ""
+    for pid, _ppid, _r, cmd in procs:
+        if (port and f"--port {port}" in cmd) or f"{name}-sidecar" in cmd:
+            return pid
+    return None
+
+
+def _descendants(root_pid: int, procs: list[tuple]) -> set[int]:
+    kids: dict[int, list[int]] = {}
+    for pid, ppid, _r, _c in procs:
+        kids.setdefault(ppid, []).append(pid)
+    seen, stack = set(), [root_pid]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        stack.extend(kids.get(x, []))
+    return seen
+
+
+async def build_inventory(client: httpx.AsyncClient) -> dict:
+    """Reconcile PROCESS RSS (truth) against /api/ps + /readyz (self-report).
+
+    Every holder gets a `tracked` verdict:
+      both         — process and API agree (the healthy case)
+      process-only — RAM is held but NO API admits it  ← the invisible-model bug
+      api-only     — an API claims loaded but no process backs it (stale self-report)
+    and an `unload` field: the exact call that frees it, or null + why not."""
+    vm = read_vm()
+    procs = _proc_table()
+    holders: list[dict] = []
+    claimed_pids: set[int] = set()
+    exempt = warm_exemptions()
+
+    # ---- 1. sidecars: RSS truth vs /readyz claim ----
+    for name, base in SIDECAR_BASE.items():
+        pid = _sidecar_pid(name, procs)
+        if pid is not None:
+            claimed_pids |= _descendants(pid, procs)
+        rss = _sidecar_rss_gb(name, procs)
+        try:
+            d = (await client.get(f"{base}/readyz", timeout=3)).json()
+        except Exception:
+            d = None
+        # Framework sidecars report `lifecycle` (cold|idle|busy); bespoke ones only
+        # `state` (warm|cold) — normalise both, and never call a live sidecar unreachable.
+        state = (d or {}).get("lifecycle")
+        if state is None and d is not None:
+            state = "busy" if d.get("busy") else ("idle" if d.get("state") == "warm" else "cold")
+        state = state or "unreachable"
+        cold_rss = (d or {}).get("cold_rss_gb")
+        floor = cold_rss if cold_rss is not None else 0.3
+        claims_loaded = state in ("idle", "busy")
+        # Two different bars. "Is a model resident" is a small delta over the cold baseline —
+        # kokoro's whole model is only ~0.3 GB, so a coarse margin called it a phantom.
+        # "Is this a LEAK" needs a much bigger one: a cold sidecar's idle interpreter can sit
+        # near a GB without holding any model, and that must not raise an alarm.
+        holds_model = (rss or 0) > floor + 0.2
+        leaking = not claims_loaded and (rss or 0) > max(floor + 1.0, 1.0)
+        if not claims_loaded and (rss or 0) <= 0.5 and state != "unreachable":
+            continue                      # cold and holding nothing — not a memory holder
+        tracked = ("process-only" if leaking else
+                   "api-only" if claims_loaded and not holds_model else "both")
+        busy = state == "busy"
+        holders.append({
+            "owner": name, "tenant": "atelier", "kind": "sidecar", "pid": pid,
+            "model": (d or {}).get("model"), "gb": rss, "state": state,
+            "busy": busy, "keep_warm": bool((d or {}).get("keep_warm")),
+            "idle_s": (d or {}).get("idle_seconds", (d or {}).get("idle_s")),
+            # (i) why this one is allowed to sit warm past the ceiling — or None, meaning
+            # it isn't and the governor will evict it.
+            "exempt_reason": (exempt.get(name) or {}).get("reason"),
+            "cold_rss_gb": cold_rss, "tracked": tracked,
+            "note": (f"reports cold but holds {rss} GB — leaked or mid-load"
+                     if tracked == "process-only" else
+                     "reports loaded but RSS is at cold baseline" if tracked == "api-only" else None),
+            "unload": (None if busy else f"POST /unload {{\"target\": \"{name}\"}}"),
+            "unload_blocked": ("busy — use /force-stop (human-gated)" if busy else None),
+        })
+
+    # ---- 2. Ollama: /api/ps claim vs live llama-server runners ----
+    try:
+        ps_models = (await client.get(f"{OLLAMA_URL}/api/ps", timeout=3)).json().get("models", [])
+    except Exception:
+        ps_models = []
+    runners = [r for r in _runner_procs(procs) if r["pid"] not in claimed_pids]
+    generating = _ollama_recently_active()
+    matched_runners: set[int] = set()
+    for m in ps_models:
+        nm = m.get("name") or ""
+        api_gb = round(m.get("size", 0) / 1e9, 2)
+        free_runners = [r for r in runners if r["pid"] not in matched_runners]
+        run = next((r for r in free_runners
+                    if r["model"] == nm or (r["model"] or "").split(":")[0] == nm.split(":")[0]),
+                   None)
+        if run is None and free_runners and api_gb:
+            # Name match failed (unresolvable blob, alias, or a manifest we can't read).
+            # An unpaired runner whose RSS is close to the API's reported size is the SAME
+            # model — pair it, or the one model is counted twice and attributed_gb exceeds
+            # actual resident memory.
+            best = min(free_runners, key=lambda r: abs(r["gb"] - api_gb))
+            if abs(best["gb"] - api_gb) <= max(2.0, 0.35 * api_gb):
+                run = best
+        if run:
+            matched_runners.add(run["pid"])
+        holders.append({
+            "owner": "ollama", "tenant": "ollama", "kind": "llm", "pid": (run or {}).get("pid"),
+            "model": nm, "gb": run["gb"] if run else round(m.get("size", 0) / 1e9, 2),
+            "api_gb": round(m.get("size", 0) / 1e9, 2),
+            "state": "busy" if generating else "idle", "busy": generating,
+            "context": m.get("context"), "expires_at": m.get("expires_at"),
+            "tracked": "both" if run else "api-only",
+            "note": None if run else "in /api/ps but no llama-server process — stale entry",
+            "unload": f"POST /unload {{\"target\": \"ollama:{nm}\"}}",
+            "unload_blocked": ("generating — unload takes effect after the current call"
+                               if generating else None),
+        })
+    # runners with NO /api/ps entry — the invisible ones. This is the case that only ever
+    # showed up as "the machine is full."
+    for r in runners:
+        if r["pid"] in matched_runners:
+            continue
+        holders.append({
+            "owner": r["kind"], "tenant": "ollama" if r["kind"] == "ollama-runner" else "unmanaged",
+            "kind": r["kind"], "pid": r["pid"], "model": r["model"], "gb": r["gb"],
+            "state": "resident", "busy": None, "tracked": "process-only",
+            "note": "HOLDS RAM BUT NO API REPORTS IT — mid-load, orphaned, or unmanaged runner",
+            "unload": f"POST /unload {{\"target\": \"pid:{r['pid']}\", \"confirm\": true}}",
+            "unload_blocked": None,
+        })
+        claimed_pids.add(r["pid"])
+
+    # ---- 3. everything else heavy — so nothing is invisible ----
+    attributed = round(sum(h["gb"] or 0 for h in holders), 1)
+    others = sorted(
+        ({"pid": p, "gb": round(rk / 1048576, 2),
+          "name": c.split()[0].rsplit("/", 1)[-1]}
+         for p, _pp, rk, c in procs
+         if p not in claimed_pids and rk / 1048576 >= max(INVENTORY_MIN_GB, 0.4)),
+        key=lambda x: x["gb"], reverse=True)[:10]
+
+    holders.sort(key=lambda h: h["gb"] or 0, reverse=True)
+    flagged = [h for h in holders if h["tracked"] != "both"]
+    return {
+        "ok": True,
+        "free_gb": vm["free_gb"], "resident_gb": vm["resident_gb"], "swapouts": vm["swapouts"],
+        "attributed_gb": attributed,
+        # Everything not attributed to a model holder: apps, the OS, kernel + the compressor.
+        # Much of it never appears in `ps`, so other_processes[] won't sum to it.
+        "other_gb": round(max(0.0, vm["resident_gb"] - attributed), 1),
+        "holders": holders,
+        "flagged": [{"owner": h["owner"], "model": h["model"], "gb": h["gb"],
+                     "tracked": h["tracked"], "note": h["note"]} for h in flagged],
+        "other_processes": others,
+        "max_idle": {"enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S,
+                     "exempt": exempt, "exempt_file": str(WARM_EXEMPT_FILE),
+                     "exempt_error": _warm_exempt_err, "recent": list(_maxidle_log)},
+        "legend": {"both": "process + API agree",
+                   "process-only": "RAM held, no API admits it",
+                   "api-only": "API claims loaded, no process backs it"},
+    }
+
+
 # ---------- async pollers ----------
 async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
     try:
@@ -246,10 +543,28 @@ async def poll_ollama(client: httpx.AsyncClient) -> list[dict]:
 async def poll_sidecar(client: httpx.AsyncClient, name: str, url: str) -> dict:
     try:
         d = (await client.get(url, timeout=3)).json()
+        governed = ("reclaim_margin_gb" in d) or ("cold_rss_gb" in d)  # on the GovernedSidecar framework
+        # Framework sidecars emit `lifecycle` (cold|idle|busy). Bespoke ones (radiogen, rerank,
+        # pyannote, maisi…) only emit `state` (warm|cold) — defaulting those to "cold" reported
+        # a WARM model as unloaded, i.e. memory the governor held but never showed.
+        lifecycle = d.get("lifecycle")
+        if lifecycle is None:
+            lifecycle = "busy" if d.get("busy") else ("idle" if d.get("state") == "warm" else "cold")
         return {"tenant": "atelier", "name": name,
-                "state": d.get("lifecycle", "cold"),
+                "state": lifecycle,
                 "active_jobs": d.get("active_jobs", 0),
-                "queue_depth": d.get("queue_depth", 0)}
+                "queue_depth": d.get("queue_depth", 0),
+                # constitution surface for the dashboard:
+                "keep_warm": bool(d.get("keep_warm")),           # WARM TAG (allowed to stay resident)
+                "active_elapsed_s": d.get("active_elapsed_s"),   # how long the current job has run
+                "device": d.get("device"),                       # mps|cuda|mlx|coreml|remote
+                "model": d.get("model"),                         # currently-loaded model (None=cold)
+                "available_models": d.get("available_models"),   # multi-model lanes (llamacpp menu)
+                "cold_rss_gb": d.get("cold_rss_gb"),             # baseline (reclaim floor)
+                # seconds since this sidecar's last request — the input to the hard idle
+                # ceiling below. Bespoke sidecars name it differently or omit it entirely.
+                "idle_seconds": d.get("idle_seconds", d.get("idle_s")),
+                "governed": governed}                            # framework-managed vs bespoke
     except Exception:
         return {"tenant": "atelier", "name": name, "state": "unreachable"}
 
@@ -329,6 +644,136 @@ async def _auto_relieve(vm: dict, tenants: list[dict]):
         _state["recommendation"] = None
 
 
+def _autoheal_check(tenants: list[dict]) -> None:
+    """(g) Enforce Law 1 from OUTSIDE. If an atelier sidecar reports state=cold (model unloaded) yet
+    still holds > AUTOHEAL_FLOOR_GB for longer than AUTOHEAL_GRACE_S, it leaked — hard-restart it via
+    launchd (kickstart -k). Self-healing (GovernedSidecar restart-reclaim) fixes it first; this is the
+    backstop so even a bespoke / non-self-healing sidecar can't hold leaked memory indefinitely."""
+    if not AUTOHEAL:
+        return
+    now = time.monotonic()
+    for t in tenants:
+        if t.get("tenant") != "atelier":
+            continue
+        name = t.get("name")
+        mem = t.get("mem_gb") or 0.0
+        leaking = t.get("state") == "cold" and mem > AUTOHEAL_FLOOR_GB
+        if not leaking:
+            _cold_heavy_since.pop(name, None)
+            continue
+        since = _cold_heavy_since.get(name)
+        if since is None:
+            _cold_heavy_since[name] = now
+            continue
+        if now - since < AUTOHEAL_GRACE_S:
+            continue
+        dur = int(now - since)
+        _cold_heavy_since.pop(name, None)
+        label = SIDECAR_LABELS.get(name)
+        if not label:
+            continue
+        try:
+            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                           check=True, capture_output=True, timeout=15)
+            print(f"[governor] AUTOHEAL restarted {name}: state=cold but held {mem}GB "
+                  f"> {AUTOHEAL_FLOOR_GB}GB for {dur}s — kickstart -k", flush=True)
+            _autoheal_log.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "name": name,
+                                  "held_gb": mem, "held_s": dur, "action": "kickstart -k"})
+        except Exception as e:
+            print(f"[governor] AUTOHEAL kickstart {name} failed: {e}", flush=True)
+
+
+def warm_exemptions(max_age_s: float = 30.0) -> dict:
+    """(i) The registry of LEGITIMATE long-warm cases: name -> {reason, owner, added}.
+
+    This is the honest half of the ceiling. There are real reasons to hold a model past
+    30 idle minutes (an ASR sidecar fronting an interactive lesson, a TTS engine mid-
+    podcast-run), and this is where such a case gets WRITTEN DOWN — with a reason, an
+    owner, and a date — instead of hiding behind a plist flag nobody remembers setting.
+
+    A `reason` is MANDATORY. An entry without a non-empty reason is ignored and reported
+    as invalid: "someone set a flag" is exactly the state this is meant to eliminate."""
+    global _warm_exempt, _warm_exempt_at, _warm_exempt_err
+    if _warm_exempt and time.time() - _warm_exempt_at < max_age_s:
+        return _warm_exempt
+    out, err = {}, None
+    try:
+        if WARM_EXEMPT_FILE.exists():
+            raw = json.loads(WARM_EXEMPT_FILE.read_text())
+            for name, v in (raw or {}).items():
+                if name.startswith("_"):
+                    continue          # _comment / _example — documentation, not an exemption
+                if isinstance(v, str):
+                    v = {"reason": v}
+                reason = (v or {}).get("reason", "").strip()
+                if not reason:
+                    err = f"{name}: no reason given — exemption ignored"
+                    continue
+                out[name] = {"reason": reason, "owner": (v or {}).get("owner"),
+                             "added": (v or {}).get("added"),
+                             "expires": (v or {}).get("expires")}
+    except Exception as e:
+        err = f"unreadable {WARM_EXEMPT_FILE}: {e}"
+    _warm_exempt, _warm_exempt_at, _warm_exempt_err = out, time.time(), err
+    return out
+
+
+async def _max_idle_check(client: httpx.AsyncClient, tenants: list[dict]) -> None:
+    """(i) Enforce the hard idle ceiling. Unload any atelier sidecar idle past MAX_IDLE_S
+    REGARDLESS of its keep_warm tag; if the unload doesn't take, kick it via launchd.
+
+    Never touches a busy sidecar or one with callers queued — the ceiling is about
+    abandoned residency, not preemption."""
+    if not MAX_IDLE_ENFORCE:
+        return
+    exempt = warm_exemptions()
+    for t in tenants:
+        if t.get("tenant") != "atelier" or t.get("state") != "idle":
+            continue
+        if t.get("busy") or (t.get("active_jobs") or 0) > 0 or (t.get("queue_depth") or 0) > 0:
+            continue
+        name = t.get("name")
+        idle_s = t.get("idle_seconds")
+        mem = t.get("mem_gb") or 0.0
+        if idle_s is None:
+            # A sidecar that won't say when it was last used can't be judged on idleness.
+            # Flag it rather than guess — silence is not consent to keep the RAM.
+            t["max_idle"] = "unknown (sidecar reports no idle_seconds)"
+            continue
+        if idle_s <= MAX_IDLE_S or mem < MAX_IDLE_MIN_GB:
+            continue
+        if name in exempt:
+            t["max_idle"] = "exempt"
+            t["exempt_reason"] = exempt[name]["reason"]
+            continue
+        acted, how = False, None
+        try:
+            base = SIDECAR_BASE.get(name)
+            r = (await client.post(f"{base}/admin/unload", timeout=15)).json()
+            if r.get("refused") == "busy":
+                continue                       # raced with a new job — leave it alone
+            acted, how = True, "admin/unload"
+        except Exception as e:
+            how = f"unload failed ({e})"
+        if not acted:
+            # "switched off OR kicked" — a sidecar with no working unload still gets freed.
+            label = SIDECAR_LABELS.get(name)
+            if label:
+                try:
+                    subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"],
+                                   check=True, capture_output=True, timeout=15)
+                    acted, how = True, f"kickstart -k ({how})"
+                except Exception as e:
+                    how = f"{how}; kickstart failed ({e})"
+        print(f"[governor] MAX-IDLE {'evicted' if acted else 'FAILED on'} {name}: "
+              f"idle {int(idle_s)}s > {int(MAX_IDLE_S)}s ceiling, held {mem}GB "
+              f"(keep_warm={t.get('keep_warm')}) — {how}", flush=True)
+        _maxidle_log.append({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "name": name,
+                             "idle_s": int(idle_s), "held_gb": mem,
+                             "keep_warm": bool(t.get("keep_warm")),
+                             "action": how, "ok": acted})
+
+
 async def _poller():
     async with httpx.AsyncClient() as client:
         while True:
@@ -341,11 +786,21 @@ async def _poller():
                 # not the dashboard's hardcoded SIDECAR_MEM guesses)
                 procs = _proc_table()
                 for t in tenants:
+                    # Measure RSS for EVERY atelier sidecar incl. COLD ones — a cold sidecar still
+                    # holding memory IS the leak we must see (and auto-heal). Only skip unreachable.
                     if (t.get("tenant") == "atelier" and not t.get("mem_gb")
-                            and t.get("state") not in (None, "cold", "unreachable")):
+                            and t.get("state") not in (None, "unreachable")):
                         rss = _sidecar_rss_gb(t["name"], procs)
                         if rss:
                             t["mem_gb"] = rss
+                # The governor NEVER emits a null memory reading — a "no value" (unmeasured /
+                # unreachable / not admitted) is always 0, so no consumer (donut, budget, grid)
+                # ever sees null/NaN. "admits no" → 0.
+                for t in tenants:
+                    if t.get("mem_gb") is None:
+                        t["mem_gb"] = 0.0
+                _autoheal_check(tenants)   # constitution enforced from OUTSIDE: cold-but-heavy → restart
+                await _max_idle_check(client, tenants)   # (i) hard 30-min idle ceiling, warm tag or not
                 # heaviest resident first, top-down (cold sidecars → mem 0 → sink to the bottom)
                 tenants.sort(key=lambda t: t.get("mem_gb") or 0.0, reverse=True)
                 spill_recent = _last_spill is not None and (time.time() - _last_spill["at"] < 120)
@@ -376,6 +831,22 @@ async def _poller():
                     "baseline_gb": baseline,            # macOS + apps (immovable, non-LLM)
                     "budget_gb": effective_budget,      # live LLM ceiling after subtracting baseline
                     "top_procs": _top_procs(procs, 8),  # where the resident memory actually is
+                    "autoheal": list(_autoheal_log),    # (g) recent Law-1 auto-restarts
+                    "max_idle": {                       # (i) the hard idle ceiling + who is excused from it
+                        "enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S,
+                        "exempt": warm_exemptions(),    # each with a WRITTEN reason, or it doesn't count
+                        "exempt_file": str(WARM_EXEMPT_FILE),
+                        "exempt_error": _warm_exempt_err,
+                        "recent": list(_maxidle_log),
+                    },
+                    "constitution": {                   # the Atelier framework, surfaced for the dashboard
+                        "laws": ["no memory leaks", "never unload an actively-working model",
+                                 "queue calls under pressure",
+                                 "nothing stays resident past the idle ceiling without a written reason"],
+                        "autoheal": {"enabled": AUTOHEAL, "floor_gb": AUTOHEAL_FLOOR_GB,
+                                     "grace_s": AUTOHEAL_GRACE_S},
+                        "max_idle": {"enabled": MAX_IDLE_ENFORCE, "ceiling_s": MAX_IDLE_S},
+                        "cliff_gb": CLIFF_GB, "warn_gb": WARN_GB},
                 })
             except Exception as e:
                 print(f"[governor] poll error: {e}", flush=True)
@@ -445,7 +916,7 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
     await gate.reap(now)
 
 # ---------- Ollama log tailer ----------
-_GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*\S+\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
+_GIN = re.compile(r'^\[GIN\]\s+(?P<date>\d{4}/\d{2}/\d{2})\s+-\s+(?P<time>\d{2}:\d{2}:\d{2})\s+\|\s*(?P<status>\d+)\s*\|\s*(?P<lat>[\d.a-zµ]+)\s*\|\s*(?P<client>\S+)\s*\|\s*(?P<method>\w+)\s+"(?P<path>[^"]+)"')
 _OFFLOAD = re.compile(r'layers\.model=(?P<model>\d+).*?layers\.offload=(?P<offload>\d+)')
 _EVICT = re.compile(r'msg="?(expired event received|stopping llama server)')
 _RUNNER = re.compile(r'llama runner started in (?P<sec>[\d.]+) seconds')
@@ -466,9 +937,19 @@ def parse_log_line(line: str):
                 ts = time.time()
         except Exception:
             ts = time.time()
+        # WHO made the call. A GIN line always carried the client IP and we threw it away,
+        # so a call from the LAN gateway was indistinguishable from one the user made here —
+        # and both showed an empty prompt/output, since a direct :11434 call never passes
+        # through the capturing proxy. Naming the client turns "why is this blank?" into
+        # "that came from a LAN host, which bypasses the governor."
+        client = m.group("client")
         entry = {"at": log_time, "ts": ts,
                  "status": m.group("status"), "latency": m.group("lat"),
-                 "path": m.group("path")}
+                 "path": m.group("path"), "client": client,
+                 "via": "direct-to-ollama",
+                 "capture_note": (f"called ollama directly on :11434 from {client} — the governor "
+                                  "only sees the access-log line (timing), so the prompt and reply "
+                                  "were never captured. Route via POST /llm/ollama/... to record them.")}
         # Attach latest perf stats (model name + tok/s) if available
         if _ollama_last_stats:
             entry.update(_ollama_last_stats)
@@ -482,7 +963,9 @@ def parse_log_line(line: str):
         # The governor's OWN benchmark probe is an /api/generate — recorded separately and
         # labeled. Skip its raw GIN line so it can't masquerade as user traffic (and can't
         # re-trigger the stats watcher into a self-perpetuating probe loop).
-        if any(p == m.group("path") and abs(pts - ts) < 3.0 for p, pts in _internal_skip):
+        # Window must cover a COLD model load (30B ≈ 5s, larger ones far more), otherwise
+        # a slow probe's log line slips past the guard and restarts the feedback loop.
+        if any(p == m.group("path") and abs(pts - ts) < PROBE_SKIP_WINDOW_S for p, pts in _internal_skip):
             return
         _recent_calls.append(entry)
         return
@@ -662,6 +1145,12 @@ async def _ollama_stats_watcher():
     # already seen (incl. our own probe) after probing.
     PROBE_COOLDOWN = float(os.environ.get("ATELIER_PROBE_COOLDOWN", "60"))
     last_probe_ts = 0.0
+    # Models that answered "does not support generate" — embedding models (bge-m3,
+    # nomic-embed…) are a hard no for /api/generate. Without this the watcher re-probed
+    # one every COOLDOWN seconds forever: an embedding call counts as a "real call", so
+    # a codebase indexer doing thousands of them kept the loop permanently armed. Left
+    # unfixed it was ~1400 failed 400s a day, all of them landing in the task stream.
+    no_generate: set = set()
     async with httpx.AsyncClient() as client:
         while True:
             await asyncio.sleep(0.5)
@@ -683,26 +1172,86 @@ async def _ollama_stats_watcher():
                         models = ps.json().get("models", [])
                         if not models:
                             continue
-                        model_name = models[0].get("name", "")
+                        # Probe the model that was actually CALLED — never models[0], which
+                        # with several loaded could be an idle one nobody is using, and the
+                        # probe would reset its idle timer. No name on the call → only probe
+                        # when exactly one model is loaded (unambiguous); otherwise skip.
+                        called = str(latest.get("model") or "")
+                        if called:
+                            target = next((mm for mm in models if called in
+                                           (mm.get("name"), mm.get("model"))), None)
+                        else:
+                            target = models[0] if len(models) == 1 else None
+                        if not target:
+                            continue
+                        model_name = target.get("name", "")
+                        # Idle policy (2026-09-14): a model stays warm OLLAMA_KEEP_ALIVE (120 s)
+                        # after its last REAL request, and no probe may extend that. Ollama resets
+                        # the expiry on every request, so pass keep_alive = the time the model has
+                        # LEFT; skip entirely if it is about to expire (a probe must not reload it).
+                        try:
+                            from datetime import datetime   # not imported at module level here
+                            _exp = re.sub(r"(\.\d{6})\d+", r"\1", str(target.get("expires_at") or ""))
+                            _left = datetime.fromisoformat(_exp).timestamp() - time.time()
+                        except Exception:
+                            _left = 0.0
+                        if _left < 10:
+                            continue
+                        probe_keep_alive = f"{int(_left)}s"
                         # Fire a tiny probe (8 tokens) for fresh eval stats. Do NOT pass
                         # keep_alive — the probe must never EXTEND a model's life (policy: don't
                         # keep things warm; fade out and reclaim on demand). It inherits the
                         # global OLLAMA_KEEP_ALIVE, same as the real call it follows, so the model
                         # expires on the normal short timer instead of being pinned by benchmarking.
+                        # Mark the skip BEFORE firing. ollama writes its GIN line the moment
+                        # the response is sent, and the tailer can read it while this coroutine
+                        # is still awaiting — so a marker appended AFTER the call arrived too
+                        # late, the probe's own log line was ingested as user traffic, and it
+                        # re-triggered this watcher on the next tick. That loop reloaded a 30B
+                        # model every ~5 minutes forever and buried the task stream in 39
+                        # self-probes out of 50 entries.
+                        if model_name in no_generate:
+                            continue          # embedding-only: benchmarking it is meaningless
+                        _probe_started = time.time()
+                        _internal_skip.append(("/api/generate", _probe_started))
                         probe = await client.post(f"{OLLAMA_URL}/api/generate",
                             json={"model": model_name, "prompt": "Hi", "stream": False,
+                                  "keep_alive": probe_keep_alive,
                                   "options": {"num_predict": 8}},
                             timeout=30)
                         # Record the probe as a LABELED, visible entry (so the dashboard shows
-                        # exactly what the governor is doing) AND mark its GIN line to be skipped.
+                        # exactly what the governor is doing) AND re-mark its GIN line: a cold
+                        # 30B load can take 30s+, so the completion timestamp may sit far outside
+                        # the match window around the start marker.
                         _now = time.time()
+                        _internal_skip.append(("/api/generate", _now))
+                        _probe_out, _probe_tok = "", None
+                        try:
+                            _pj = probe.json()
+                            _probe_out = _extract_output(_pj)
+                            _probe_tok = _pj.get("eval_count")
+                            if probe.status_code >= 400:
+                                _err = str(_pj.get("error") or _pj)[:300]
+                                _probe_out = f"▲ probe failed ({probe.status_code}): {_err}"
+                                if "does not support generate" in _err:
+                                    no_generate.add(model_name)
+                                    print(f"[governor] {model_name} does not support generate — "
+                                          f"will not benchmark it again", flush=True)
+                        except Exception:
+                            pass
                         _recent_calls.append({
-                            "at": time.strftime("%H:%M:%S"), "ts": _now, "status": "200",
-                            "latency": "—", "path": "/api/generate", "model": model_name,
+                            # the real status: hardcoding 200 made a failing probe look healthy
+                            "at": time.strftime("%H:%M:%S"), "ts": _now,
+                            "status": str(probe.status_code),
+                            "latency": f"{_now - _probe_started:.2f}s",
+                            "path": "/api/generate", "model": model_name,
                             "backend": "ollama", "via": "governor-probe",
                             "prompt": f"▣ governor warm-up/benchmark probe for {model_name} (num_predict=8)",
+                            # record what came back, so opening this row shows something real
+                            # instead of an empty pane
+                            "output": _probe_out or "(no text — probe capped at 8 tokens)",
+                            "eval_tokens": _probe_tok,
                         })
-                        _internal_skip.append(("/api/generate", _now))
                         if probe.status_code == 200:
                             d = probe.json()
                             ec = d.get("eval_count", 0)
@@ -759,11 +1308,100 @@ async def _history_saver():
         await asyncio.sleep(15)
         _save_history()
 
+_intercept_started = False   # guard: only the primary lifespan may open the second socket
+
+
+async def _serve_intercept_port():
+    """(j) TRANSPARENT CAPTURE — also answer on ollama's own port.
+
+    Opt-in capture never finishes the job: every client that only exposes a "base URL"
+    (Cline, LiteLLM, anything embedding-based) keeps finding its way back to :11434, and
+    ollama's logs cannot recover a bypassed call — even at --log-verbosity 4 they record
+    token COUNTS, never prompt text. The only way to be sure is to BE the port.
+
+    Ollama moves to 127.0.0.1:11435 (loopback-only) and the governor answers on 11434,
+    so a call is captured whether or not the client cooperates. Same app, same state,
+    second socket — the drop-in /api/* and /v1/* routes already speak ollama's dialect.
+
+    Binds nothing unless ATELIER_INTERCEPT_PORT is set, and a bind failure is logged
+    loudly but never fatal: losing the governor must not also take down the hub."""
+    port = int(os.environ.get("ATELIER_INTERCEPT_PORT", "0"))
+    if not port:
+        return
+    host = os.environ.get("ATELIER_INTERCEPT_HOST", "0.0.0.0")
+    # Self-loop check compares the FULL address, not just the port. Sharing a port number
+    # with ollama is the normal case here: ollama binds 127.0.0.1:11434 (Expose off) while
+    # we bind the LAN address on the same port, so LAN clients reach us and loopback
+    # reaches ollama. Only an identical host AND port would proxy to itself.
+    from urllib.parse import urlparse
+    up = urlparse(OLLAMA_URL)
+    up_host = (up.hostname or "").replace("localhost", "127.0.0.1")
+    up_port = up.port or 11434
+    if up_port == port and (up_host == host or host == "0.0.0.0"):
+        print(f"[governor] INTERCEPT ABORTED: upstream {OLLAMA_URL} is the same address as "
+              f"{host}:{port} — that would proxy to itself. Bind the LAN address "
+              f"(ATELIER_INTERCEPT_HOST) or move ollama to another port.", flush=True)
+        return
+    global _intercept_started
+    if _intercept_started:
+        return
+    _intercept_started = True
+    import uvicorn
+    # lifespan="off" is REQUIRED, not tidiness: serving the same `app` object runs its
+    # lifespan again, which starts another intercept listener, which serves the app
+    # again — an infinite recursion that spawned servers until the port bind failed.
+    # The primary listener already owns startup; this socket only needs to serve.
+    cfg = uvicorn.Config(app, host=host, port=port, log_level="warning", lifespan="off")
+    server = uvicorn.Server(cfg)
+    server.install_signal_handlers = lambda: None    # secondary server: parent owns signals
+    # Bind the socket OURSELVES and hand it to uvicorn. Two reasons, both learned the
+    # hard way: (1) uvicorn logs a bind failure and calls sys.exit, raising SystemExit —
+    # a BaseException that `except OSError` never sees, so the retry silently died;
+    # (2) serve() binds internally, so anything printed before it announces success that
+    # has not happened yet. Owning the socket makes "active" mean actually listening.
+    retry_s = float(os.environ.get("ATELIER_INTERCEPT_RETRY_S", "30"))
+    announced_wait = False
+    while True:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+            sock.listen(2048)
+            sock.setblocking(False)
+        except OSError as e:
+            sock.close()
+            if not announced_wait:
+                print(f"[governor] intercept cannot bind {host}:{port} yet ({e}). Ollama "
+                      f"still holds it — turn OFF 'Expose Ollama to the network' in "
+                      f"Ollama.app so it binds 127.0.0.1 only. Retrying every "
+                      f"{int(retry_s)}s; the governor keeps working on its own port.",
+                      flush=True)
+                announced_wait = True
+            await asyncio.sleep(retry_s)
+            continue
+        try:
+            print(f"[governor] TRANSPARENT INTERCEPT listening on {host}:{port} → "
+                  f"upstream {OLLAMA_URL} (LAN clients are now captured)", flush=True)
+            await server.serve(sockets=[sock])
+            return
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:          # SystemExit included — never kill the governor
+            print(f"[governor] intercept listener stopped: {e!r}", flush=True)
+            return
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_history()   # restore task history BEFORE the log tailer adds live ones
     tasks = [asyncio.create_task(_poller()), asyncio.create_task(_log_tailer()),
-             asyncio.create_task(_ollama_stats_watcher()), asyncio.create_task(_history_saver())]
+             asyncio.create_task(_ollama_stats_watcher()), asyncio.create_task(_history_saver()),
+             asyncio.create_task(_serve_intercept_port())]
     for nm, p in SIDECAR_LOGS.items():
         tasks.append(asyncio.create_task(_tail_sidecar(nm, p)))
     yield
@@ -794,12 +1432,32 @@ SIDECAR_ROLES = {
     "kokoro": "TTS — fast, fixed voices (fallback)",
     "dia": "TTS — expressive voice cloning (batch)",
     "whisper": "ASR — speech-to-text, + optional LLM structure/summarize",
+    "pronounce": "Pronunciation scoring — espeak-ng IPA + CUPE-2i phonemes, reference-based (Italian)",
     "llamacpp": "LLM — llama.cpp/llama-server (Metal, GGUF), OpenAI-compatible",
     "fastmlx": "LLM/VLM — FastMLX (MLX-native), OpenAI-compatible [blocked: upstream]",
     "mlxlm": "LLM — Apple mlx_lm.server (MLX-native), OpenAI-compatible",
     "medner": "NER — medical entity extraction (GLiNER + d4data + scispaCy, MPS)",
+    "colpali": "Retrieval — ColPali visual-document scoring/embeddings (MPS)",
+    "tabfm": "Tabular — Tabular Foundation Models (TabPFN-3 + Google TabFM): predict/fit-cache/embed on parquet",
+    "rerank": "Rerank — cross-encoder BAAI/bge-reranker-v2-m3 (query,passages→scores) (MPS)",
+    "pyannote": "Diarization — speaker diarization (pyannote.audio): who-spoke-when (MPS)",
+    "audio-llm": "Audio understanding — classify/describe an audio track (multi-model: Qwen2-Audio/Voxtral/Qwen3-Omni, MLX)",
 }
-AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner"}
+AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner",
+                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm", "pronounce"}
+
+# Present on the box but NOT governed sidecars (no admit/unload contract). Surfaced in /agent so
+# an agent has the COMPLETE picture — but the governor CANNOT admit/evict these; their memory sits
+# in baseline_gb. `probe` is a GET that returns 200 when the service is up (for live-state on expand).
+OTHER_SERVICES = {
+    "comfyui": {
+        "base_url": "http://127.0.0.1:8188",
+        "role": "Image/video generation (ComfyUI) — node-graph UI + API",
+        "probe": "/system_stats",
+        "note": "NOT a governed sidecar: no /admin/unload, so the governor can't idle-evict it and "
+                "its VRAM/RAM counts as baseline_gb. Stop it manually if the box is under memory pressure.",
+    },
+}
 
 async def _fetch_agent_manifest(client: httpx.AsyncClient, url: str) -> dict:
     """Pull one sidecar's /agent. GET /agent never wakes a model, so expanding is
@@ -820,14 +1478,20 @@ async def agent(expand: bool = False):
 
     Add ?expand=true to inline EVERY sidecar's full /agent manifest in this one
     response (concurrent fan-out) — one round-trip, no follow-up fetches."""
+    live = {t.get("name"): t for t in _state.get("tenants", [])}   # fold in live health (from the poller)
     sidecars = {}
     for name, base in SIDECAR_BASE.items():
+        lt = live.get(name, {})
         sidecars[name] = {
             "base_url": base,
             "role": SIDECAR_ROLES.get(name, "sidecar"),
+            "state": lt.get("state", "unknown"),   # cold | idle | busy | unreachable
+            "mem_gb": lt.get("mem_gb"),
             "readyz": f"{base}/readyz",
             "agent": f"{base}/agent" if name in AGENT_CAPABLE else None,
         }
+    other = {n: {"base_url": m["base_url"], "role": m["role"], "governed": False, "note": m["note"]}
+             for n, m in OTHER_SERVICES.items()}
     if expand:
         token = os.environ.get("HUB_TOKEN")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -836,6 +1500,12 @@ async def agent(expand: bool = False):
             manifests = await asyncio.gather(
                 *[_fetch_agent_manifest(client, f"{b}/agent") for _, b in capable]
             )
+            for n, m in OTHER_SERVICES.items():   # live-probe the ungoverned apps too
+                try:
+                    r = await client.get(m["base_url"] + m.get("probe", "/"), timeout=2)
+                    other[n]["state"] = "up" if r.status_code < 500 else "down"
+                except Exception:
+                    other[n]["state"] = "down"
         for (n, _), manifest in zip(capable, manifests):
             sidecars[n]["manifest"] = manifest
     return {
@@ -885,10 +1555,31 @@ async def agent(expand: bool = False):
             "POST /report": "feed a completed run into the predictor",
             "POST /llm/{backend}/{path}": "capturing proxy — the recommended way to run LLMs",
             "POST /admit · POST /release": "manual memory lease (the proxy does this for you)",
+            "GET /inventory": "who ACTUALLY holds memory — process RSS vs API self-report, "
+                              "with the exact unload call per holder; flags what no API admits",
+            "POST /unload": "free one target: {target: '<sidecar>'|'ollama:<model>'|'pid:<n>'}",
             "POST /make-room": "evict ONLY idle models to free memory",
             "POST /force-stop": "human-gated preempt of a BUSY model",
         },
         "sidecars": sidecars,
+        "other_services": other,   # present on the box but NOT governed (comfyui, etc.) — see each note
+        "context": {
+            "why_it_matters": "num_ctx (context window) is a MEMORY decision on the Mac's unified RAM. "
+                              "Too SMALL chokes/truncates a local model → bad or cut-off answers. Too BIG "
+                              "blows the KV-cache past free memory → the box SWAP-DEATHS (e.g. ornith-35b's "
+                              "native 262144 ≈ ~40 GB of KV). NEVER guess a num_ctx by hand.",
+            "governed (anything heavy)": "Call THROUGH the governor (POST /llm/{backend}/{path}) and OMIT "
+                                         "num_ctx — it auto-sizes to your prompt + live free memory, capped "
+                                         "safe (never the naive native max). Point any Ollama client (e.g. "
+                                         "Goose) at http://192.168.0.159:8799/llm/ollama and it auto-detects "
+                                         "a safe window from the rewritten /api/show — zero manual pinning.",
+            "raw :11434 callers": "For calls that bypass the governor, use the `ollama-ctx` dial "
+                                  "(~/.local/bin/ollama-ctx: list | global <N> | set <model> <N|max> | "
+                                  "research). Global default was raised 16384→131072 (a silent Ollama.app "
+                                  "sqlite ceiling); per-model trained-max in ~/.config/ollama-ctx/registry.json.",
+            "rule": "The governor is the ONE place that knows live memory — use it for anything heavy and "
+                    "you never hand-tune num_ctx again. See R-AG5/R-AG6 in atelier-governor.md.",
+        },
         "ollama": {"base_url": OLLAMA_URL, "role": "LLM + embeddings + VLM",
                    "list_loaded": f"{OLLAMA_URL}/api/ps",
                    "via_gate": "prefer POST /llm/ollama/... so calls are admitted + captured"},
@@ -1051,26 +1742,41 @@ async def make_room(req: MakeRoomReq):
         # 1. idle sidecars. With a need_gb target, evict LRU-FIRST (most-idle first) and STOP
         #    once free ≥ target — minimal eviction preserves recently-used warm models. With
         #    need_gb=0 (the ALARM path) evict EVERY idle sidecar (aggressive, guaranteed room).
-        idle_sidecars = []
+        idle_all = []
         for name, base in SIDECAR_BASE.items():
             try:
                 d = (await client.get(f"{base}/readyz", timeout=3)).json()
             except Exception:
                 continue
             if d.get("lifecycle") == "idle":
-                idle_sidecars.append((name, base, float(d.get("idle_seconds", 0) or 0)))
+                idle_all.append((name, base, float(d.get("idle_seconds", 0) or 0),
+                                 bool(d.get("keep_warm"))))   # respect the WARM TAG
+        # WARM TAG: a sidecar advertising keep_warm=true has opted to stay resident (e.g. whisper
+        # for chiron latency). Evict every NON-warm idle sidecar first; a warm-tagged one is
+        # touched only as a last resort — target still unmet (need_gb), or still over the cliff.
+        non_warm = [s for s in idle_all if not s[3]]
+        warm = [s for s in idle_all if s[3]]
         if req.need_gb:
-            idle_sidecars.sort(key=lambda s: s[2], reverse=True)   # LRU: most-idle evicted first
-        for name, base, idle_s in idle_sidecars:
+            non_warm.sort(key=lambda s: s[2], reverse=True)   # LRU: most-idle evicted first
+            warm.sort(key=lambda s: s[2], reverse=True)
+        for name, base, idle_s, kw in non_warm + warm:      # warm ones always come LAST
             if req.need_gb and not req.dry_run and read_vm()["free_gb"] >= req.need_gb:
-                notes.append(f"target {req.need_gb}GB reached — stopped before {name} (LRU-preserved)")
+                notes.append(f"target {req.need_gb}GB reached — stopped before {name}"
+                             + (" (WARM-tagged, preserved)" if kw else " (LRU-preserved)"))
                 break
+            # ALARM sweep (need_gb=0): preserve a WARM-tagged sidecar unless we're STILL over the
+            # cliff. This is a DECISION (shown in dry-run too), not just an action.
+            if kw and not req.need_gb and read_vm()["resident_gb"] < CLIFF_GB:
+                notes.append(f"{name} WARM-tagged + below cliff — preserved")
+                continue
             if req.dry_run:
-                freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "would_evict": True})
+                freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s),
+                              "keep_warm": kw, "would_evict": True})
             else:
                 try:
                     r = (await client.post(f"{base}/admin/unload", timeout=12)).json()
-                    freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s), "result": r})
+                    freed.append({"tenant": "atelier", "name": name, "idle_s": round(idle_s),
+                                  "keep_warm": kw, "result": r})
                     await asyncio.sleep(0.8)   # let macOS reclaim before the next free re-check
                 except Exception as e:
                     notes.append(f"{name} unload failed: {e}")
@@ -1251,6 +1957,165 @@ async def force_stop(req: ForceStopReq):
                 "result": result}
 
 
+# ========== (h) inventory + the single unload door ==========
+@app.get("/inventory")
+async def inventory():
+    """WHO IS ACTUALLY HOLDING MEMORY — process truth reconciled against every API claim.
+    Read this instead of guessing from free_gb. `flagged` is the honest part: anything the
+    self-reports got wrong."""
+    async with httpx.AsyncClient() as client:
+        return await build_inventory(client)
+
+
+class UnloadReq(BaseModel):
+    target: str = ""       # "<sidecar>" | "ollama:<model>" | "pid:<n>"
+    force: bool = False    # sidecar only: preempt a BUSY model (framework refuses otherwise)
+    confirm: bool = False  # required for pid: — killing a process is not reversible
+
+
+@app.post("/unload")
+async def unload(req: UnloadReq):
+    """ONE door to free a specific thing, whatever holds it. Idle targets need nothing;
+    a BUSY sidecar needs force=true (prefer /force-stop's human-gated handshake); a raw
+    pid needs confirm=true because there is no graceful protocol for an orphan."""
+    if not req.target:
+        return {"ok": False, "error": "target required — <sidecar> | ollama:<model> | pid:<n>",
+                "hint": "GET /inventory lists every target with its exact unload call"}
+    before = read_vm()["free_gb"]
+    result: dict = {}
+
+    if req.target.startswith("pid:"):
+        try:
+            pid = int(req.target.split(":", 1)[1])
+        except ValueError:
+            return {"ok": False, "error": f"bad pid in '{req.target}'"}
+        procs = _proc_table()
+        row = next((p for p in procs if p[0] == pid), None)
+        if not row:
+            return {"ok": False, "error": f"pid {pid} not running"}
+        cmd, gb = row[3], round(row[2] / 1048576, 2)
+        if not any(h in cmd for h in _RUNNER_HINTS):
+            return {"ok": False, "error": f"pid {pid} is not a model runner — refusing",
+                    "process": cmd.split()[0], "note": "only model-holding processes are killable here"}
+        if not req.confirm:
+            return {"ok": True, "phase": "preview", "pid": pid, "gb": gb,
+                    "process": cmd[:160],
+                    "effect": "SIGTERM — no in-flight request is drained first",
+                    "next": f're-POST with {{"target": "pid:{pid}", "confirm": true}}'}
+        try:
+            os.kill(pid, 15)
+            result = {"method": "SIGTERM", "pid": pid, "gb_held": gb}
+        except Exception as e:
+            return {"ok": False, "error": f"kill {pid} failed: {e}"}
+
+    elif req.target.startswith("ollama:"):
+        model = req.target.split(":", 1)[1]
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(f"{OLLAMA_URL}/api/generate",
+                                  json={"model": model, "keep_alive": 0}, timeout=20)
+            except Exception as e:
+                return {"ok": False, "error": f"ollama unload {model} failed: {e}"}
+        result = {"method": "keep_alive=0", "model": model,
+                  "note": "frees after the current request returns"}
+
+    elif req.target in SIDECAR_BASE:
+        base = SIDECAR_BASE[req.target]
+        params = {"force": "true"} if req.force else {}
+        async with httpx.AsyncClient() as client:
+            try:
+                r = (await client.post(f"{base}/admin/unload", params=params, timeout=15)).json()
+            except Exception as e:
+                return {"ok": False, "error": f"{req.target} unload failed: {e}",
+                        "hint": "sidecar may have no /admin/unload — check GET /inventory"}
+        if r.get("refused") == "busy":
+            return {"ok": False, "refused": "busy", "target": req.target, "sidecar_result": r,
+                    "hint": "pass force=true, or use /force-stop for the human-gated handshake"}
+        result = {"method": "/admin/unload" + ("?force=true" if req.force else ""),
+                  "sidecar_result": r}
+    else:
+        return {"ok": False, "error": f"unknown target '{req.target}'",
+                "known": sorted(SIDECAR_BASE) + ["ollama:<model>", "pid:<n>"]}
+
+    await asyncio.sleep(1.5)   # let macOS reclaim before re-reading
+    after = read_vm()["free_gb"]
+    return {"ok": True, "target": req.target, "before_gb": before, "after_gb": after,
+            "freed_gb": round(after - before, 1), "result": result}
+
+
+class IngestCall(BaseModel):
+    """One LLM call that never touched this box — report it so the stream is complete."""
+    model: str = ""
+    backend: str = "external"        # e.g. "ollama-cloud", "openai", "anthropic"
+    origin: str = ""                 # who ran it: "wuphf/researcher · task-1841"
+    prompt: str = ""
+    output: str = ""
+    status: int = 200
+    latency_s: float | None = None
+    in_tok: int | None = None
+    out_tok: int | None = None
+    ts: float | None = None          # unix seconds; defaults to now
+    detail: dict | None = None       # anything else worth keeping (agent, task, trace…)
+
+
+@app.post("/telemetry/ingest")
+async def telemetry_ingest(req: IngestCall):
+    """Record a call the governor could not see.
+
+    The office's frontier models run on Ollama Cloud, so those calls never reach this
+    machine and can never appear in the task stream — which makes the stream a partial
+    record and leaves cloud spend invisible next to local. Reporting them here puts local
+    and cloud in ONE searchable place with the same shape, joined by `origin`.
+
+    Marked via="reported" so a self-declared record is never mistaken for one the
+    governor observed itself."""
+    ts = req.ts or time.time()
+    entry = {
+        "at": time.strftime("%H:%M:%S", time.localtime(ts)), "ts": ts,
+        "status": str(req.status),
+        "latency": f"{req.latency_s:.2f}s" if req.latency_s is not None else "—",
+        "path": "/external", "model": req.model or "?", "backend": req.backend,
+        "via": "reported",
+        "prompt": _clip(req.prompt), "output": _clip(req.output),
+        "in_tok": req.in_tok, "eval_tokens": req.out_tok,
+        "origin": (req.origin or _origin_label(req.detail or {}) or None),
+        "origin_detail": req.detail or None,
+        "capture_note": None,
+    }
+    _recent_calls.append(entry)
+    return {"ok": True, "recorded": {"model": entry["model"], "origin": entry["origin"],
+                                     "prompt_chars": len(entry["prompt"] or ""),
+                                     "output_chars": len(entry["output"] or "")}}
+
+
+@app.get("/telemetry/search")
+async def telemetry_search(q: str = "", origin: str = "", model: str = "",
+                           via: str = "", limit: int = 50):
+    """Search the task stream. Substring, case-insensitive, across prompt/output/model/origin.
+
+    The stream holds a rolling window of calls; scrolling it by eye to find "what did the
+    researcher agent ask at 14:05" does not scale past a handful of rows."""
+    ql, ol, ml, vl = q.lower(), origin.lower(), model.lower(), via.lower()
+    out = []
+    for c in reversed(_recent_calls):
+        if ol and ol not in str(c.get("origin") or "").lower():
+            continue
+        if ml and ml not in str(c.get("model") or "").lower():
+            continue
+        if vl and vl not in str(c.get("via") or "").lower():
+            continue
+        if ql:
+            hay = " ".join(str(c.get(k) or "") for k in
+                           ("prompt", "output", "model", "origin", "backend", "client", "path"))
+            if ql not in hay.lower():
+                continue
+        out.append(c)
+        if len(out) >= max(1, min(limit, 200)):
+            break
+    return {"ok": True, "count": len(out), "query": {"q": q, "origin": origin,
+            "model": model, "via": via}, "calls": out}
+
+
 # ========== LLM admission gate — the request-path queue (docs/LLM_ADMISSION_QUEUE.md) ==========
 # Clients call POST /admit BEFORE hitting a backend; run only on grant=true; POST /release
 # when done. The gate packs jobs into ONE global memory budget across Ollama+mlxlm+llamacpp,
@@ -1365,6 +2230,7 @@ PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
 # --- auto-size num_ctx to the prompt (so long inputs aren't silently truncated) ---
 PROXY_CTX_DEFAULT = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384"))  # the cheap baseline window
 PROXY_CTX_CEILING = int(os.environ.get("ATELIER_PROXY_CTX_CEILING", "32768"))  # don't grow past this
+PROXY_CTX_HEADROOM_RESERVE_GB = float(os.environ.get("ATELIER_PROXY_CTX_HEADROOM_RESERVE_GB", "2"))  # GB kept free above the KV cache
 CHARS_PER_TOKEN = float(os.environ.get("ATELIER_CHARS_PER_TOKEN", "3.5"))  # rough, overestimates slightly
 KV_DTYPE_BYTES = float(os.environ.get("ATELIER_KV_DTYPE_BYTES", "2"))      # f16 KV cache = 2 bytes/elem
 _ollama_meta_cache: dict[str, dict] = {}
@@ -1416,13 +2282,55 @@ def _prompt_chars(body: dict) -> int:
     return len(str(body.get("prompt", "")))
 
 
-def _autosize_ctx(body: dict, native_max: int, prompt_chars: int) -> int | None:
+def _headroom_ctx_ceiling(model: str, native_max: int) -> int:
+    """Largest num_ctx whose KV cache still fits the governor's LIVE free budget.
+    Replaces a static ceiling so a model with memory to spare can grow to its full
+    native window instead of a fixed 32K cap. KV is linear: est_gb = weights +
+    kv_rate*ctx, so the memory-safe ceiling solves kv_rate*ctx <= free - weights -
+    reserve. Falls back to the static PROXY_CTX_CEILING when the per-model KV rate
+    is unknown (arch we couldn't parse) or memory is tight."""
+    hard = native_max or PROXY_CTX_CEILING
+    rate = gate._kv_rate_for(model)                       # GB per token
+    if rate <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    kv_budget = gate.free_budget_gb() - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
+    if kv_budget <= 0:
+        return min(PROXY_CTX_CEILING, hard)               # tight memory → stay conservative
+    fit = int(kv_budget / rate)
+    return max(PROXY_CTX_DEFAULT, min(fit, hard))         # never below default, never past native max
+
+
+def _governor_safe_ctx(model: str, native_max: int) -> int:
+    """The largest context window this model can safely use under normal operating
+    memory. Sized from WARN_GB (a FIXED constant = the safe-operating LLM envelope),
+    NOT the live gate.budget_gb (= cliff - headroom - transient baseline), which
+    collapses when non-LLM memory spikes (macOS indexing, leaky sidecars) and would lock
+    a tiny window into a client that auto-detects at a bad moment. Actual chats are
+    clamped to LIVE memory in _autosize_ctx, so this report stays stable + optimistic."""
+    hard = native_max or PROXY_CTX_CEILING
+    rate = gate._kv_rate_for(model)
+    if rate <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    kv_budget = WARN_GB - gate.weights_gb(model) - PROXY_CTX_HEADROOM_RESERVE_GB
+    if kv_budget <= 0:
+        return min(PROXY_CTX_CEILING, hard)
+    fit = int(kv_budget / rate)
+    return max(PROXY_CTX_DEFAULT, min(fit, hard))
+
+
+def _autosize_ctx(body: dict, model: str, native_max: int, prompt_chars: int) -> int | None:
     """If the estimated prompt won't fit the default window, return a larger num_ctx
     (next power of two, bounded by the ceiling and the model's native max). None = leave
     the default. Respects a caller-supplied num_ctx."""
     opts = body.get("options") or {}
-    if opts.get("num_ctx"):                      # caller decided — never override
-        return None
+    caller_ctx = opts.get("num_ctx")
+    if caller_ctx:
+        # Respect a caller's num_ctx, but CLAMP it down to what fits LIVE memory — a
+        # client (e.g. Goose auto-detecting a big window from /api/show) must never be
+        # able to force a context the box can't hold. Returning the clamped value also
+        # gives admission the correct estimate (est_gb below uses chosen_ctx).
+        ceiling = _headroom_ctx_ceiling(model, native_max)
+        return min(int(caller_ctx), ceiling)
     reserve = max(1024, int(opts.get("num_predict") or 0))   # room for the response
     est = int(prompt_chars / CHARS_PER_TOKEN) + reserve
     if est <= PROXY_CTX_DEFAULT:                 # fits the cheap window → leave it
@@ -1430,9 +2338,26 @@ def _autosize_ctx(body: dict, native_max: int, prompt_chars: int) -> int | None:
     target = PROXY_CTX_DEFAULT
     while target < est:
         target *= 2
-    ceiling = min(PROXY_CTX_CEILING, native_max) if native_max else PROXY_CTX_CEILING
+    ceiling = _headroom_ctx_ceiling(model, native_max)   # memory-aware, not a static 32K cap
     target = min(target, ceiling)
     return target if target > PROXY_CTX_DEFAULT else None
+
+
+# How much of each call to keep. The task stream exists to answer "what did I actually
+# send and what came back" — a 2000-char clip truncated mid-prompt answered neither, so
+# the ceiling is generous and the UI scrolls. Both ends are capped so one runaway
+# generation can't bloat the durable history file.
+CAPTURE_CHARS = int(os.environ.get("ATELIER_CAPTURE_CHARS", "20000"))
+
+
+def _clip(text, limit=None):
+    """Trim to the capture ceiling, but SAY SO — a silently truncated body reads as a
+    model that stopped early, which is a different (and alarming) bug."""
+    limit = limit or CAPTURE_CHARS
+    t = str(text or "")
+    if len(t) <= limit:
+        return t
+    return t[:limit] + f"\n\n… [truncated {len(t) - limit:,} more chars of {len(t):,}]"
 
 
 def _extract_prompt(body: dict) -> str:
@@ -1444,9 +2369,118 @@ def _extract_prompt(body: dict) -> str:
             if isinstance(content, list):   # OpenAI structured content parts
                 content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
             parts.append(f"{mm.get('role','?')}: {content}")
-        return "\n".join(parts)[:2000]
-    p = body.get("prompt")
-    return str(p)[:2000] if p else ""
+        return _clip("\n".join(parts))
+    if body.get("prompt"):
+        return _clip(body["prompt"])
+    # EMBEDDINGS. /v1/embeddings and ollama /api/embed put the text in `input` — a string,
+    # a list of strings, or (rarely) pre-tokenised id lists. Reading only messages/prompt
+    # left every embedding call with an empty input pane while still reporting a token
+    # count, which read as "capture is broken" when it was simply the wrong field.
+    inp = body.get("input")
+    if isinstance(inp, str):
+        return _clip(inp)
+    if isinstance(inp, list) and inp:
+        if all(isinstance(x, str) for x in inp):
+            return _clip("\n---\n".join(f"[{i}] {x}" for i, x in enumerate(inp)))
+        return _clip(f"({len(inp)} pre-tokenised input(s) — ids, not text)")
+    return ""
+
+
+def _summarise_embeddings(j: dict) -> str:
+    """Embeddings have no reply TEXT — the answer is vectors. Say what came back
+    (how many, what width) instead of leaving the pane blank as if nothing arrived."""
+    data = j.get("data")
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "embedding" in data[0]:
+        dims = len(data[0]["embedding"] or [])
+        head = ", ".join(f"{v:.4f}" for v in (data[0]["embedding"] or [])[:8])
+        return (f"▣ {len(data)} embedding vector(s) × {dims} dims — no reply text.\n"
+                f"first vector starts: [{head} …]")
+    emb = j.get("embeddings") or ([j["embedding"]] if isinstance(j.get("embedding"), list) else None)
+    if isinstance(emb, list) and emb and isinstance(emb[0], list):
+        head = ", ".join(f"{v:.4f}" for v in emb[0][:8])
+        return (f"▣ {len(emb)} embedding vector(s) × {len(emb[0])} dims — no reply text.\n"
+                f"first vector starts: [{head} …]")
+    return ""
+
+
+def _extract_output(j: dict) -> str:
+    """The assistant's reply text, from either dialect.
+
+    ollama /api/chat -> message.content   ·  /api/generate -> response
+    OpenAI-style     -> choices[0].message.content (or .text for completions)"""
+    if not isinstance(j, dict):
+        return ""
+    emb = _summarise_embeddings(j)
+    if emb:
+        return emb
+    ch = j.get("choices")
+    if isinstance(ch, list) and ch:
+        c0 = ch[0] or {}
+        msg = c0.get("message") or c0.get("delta") or {}
+        if isinstance(msg, dict):
+            return _clip(_join_reasoning(msg.get("reasoning_content") or msg.get("reasoning"),
+                                        msg.get("content")) or c0.get("text") or "")
+        return _clip(c0.get("text") or "")
+    msg = j.get("message")
+    if isinstance(msg, dict) and (msg.get("content") or msg.get("thinking")):
+        return _clip(_join_reasoning(msg.get("thinking"), msg.get("content")))
+    return _clip(j.get("thinking") and _join_reasoning(j.get("thinking"), j.get("response"))
+                 or j.get("response") or "")
+
+
+def _join_reasoning(thinking, content) -> str:
+    """Reasoning models split their reply: the chain-of-thought lands in `thinking`
+    (ollama) / `reasoning_content` (OpenAI-style) and the answer in `content`.
+
+    Reading only `content` showed an EMPTY output for every reasoning model — and worse,
+    for a call cut short by num_predict the thinking is the only text that exists, so the
+    pane looked broken when the model had in fact produced plenty. Keep both, labelled,
+    so a truncated-in-thought call is legible instead of blank."""
+    t, c = (thinking or "").strip(), (content or "").strip()
+    if t and c:
+        return f"[thinking]\n{t}\n\n[answer]\n{c}"
+    if t:
+        return f"[thinking — no answer text was emitted]\n{t}"
+    return c
+
+
+def _output_from_stream(buf: bytes) -> str:
+    """Reassemble a streamed reply from its chunks.
+
+    A stream arrives as hundreds of fragments; each carries a sliver of text in
+    delta.content (OpenAI SSE) or message.content / response (ollama ndjson). Without
+    this, every streamed call — which is most interactive ones — showed no output at all."""
+    parts, think = [], []
+    for line in buf.decode("utf-8", "ignore").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("data:"):
+            line = line[5:].strip()
+            if line == "[DONE]":
+                continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        ch = obj.get("choices")
+        if isinstance(ch, list) and ch:
+            d = (ch[0] or {}).get("delta") or (ch[0] or {}).get("message") or {}
+            if isinstance(d, dict):
+                if d.get("reasoning_content") or d.get("reasoning"):
+                    think.append(d.get("reasoning_content") or d.get("reasoning"))
+                if d.get("content"):
+                    parts.append(d["content"])
+            continue
+        m = obj.get("message")
+        if isinstance(m, dict):
+            if m.get("thinking"):
+                think.append(m["thinking"])
+            if m.get("content"):
+                parts.append(m["content"])
+        elif obj.get("response"):
+            parts.append(obj["response"])
+    return _clip(_join_reasoning("".join(think), "".join(parts)))
 
 
 def _usage_from_obj(j: dict):
@@ -1484,16 +2518,73 @@ def _usage_from_stream(buf: bytes, backend: str):
     return _usage_from_obj(last) if last else (None, None, None)
 
 
+def _extract_origin(request, body: dict) -> dict:
+    """WHO/WHAT made this call — the join key between an agent's own logs and this stream.
+
+    Without it every row from the LAN is just one bare IP, so a task-stream entry can
+    only be matched back to the office by eyeballing timestamps — which breaks the moment
+    two agents run at once. Callers attach identity in whatever way their stack allows, so
+    read all of them and keep the first that answers:
+
+      headers  X-Atelier-Origin / -Agent / -Task / -Session   (anything explicit)
+               X-Title, HTTP-Referer                          (OpenRouter-style, free in many clients)
+      body     user                                           (OpenAI standard field, survives LiteLLM)
+               metadata.{agent,task,task_id,session,trace_id}  (LiteLLM passes metadata through)
+
+    Everything is optional — a call with no identity is recorded exactly as before."""
+    h = {k.lower(): v for k, v in request.headers.items()}
+    d = {}
+    for key, hdr in (("origin", "x-atelier-origin"), ("agent", "x-atelier-agent"),
+                     ("task", "x-atelier-task"), ("session", "x-atelier-session"),
+                     ("title", "x-title"), ("referer", "http-referer")):
+        if h.get(hdr):
+            d[key] = str(h[hdr])[:200]
+    if isinstance(body, dict):
+        if body.get("user"):
+            d.setdefault("user", str(body["user"])[:200])
+        md = body.get("metadata")
+        if isinstance(md, dict):
+            for k in ("agent", "task", "task_id", "session", "session_id", "trace_id", "origin"):
+                if md.get(k):
+                    d.setdefault(k, str(md[k])[:200])
+    # WHO CONNECTED — always available, needs no cooperation from the caller. Once traffic
+    # is routed through the governor, ollama's own access log only ever shows 127.0.0.1
+    # (the governor forwarding), so the requester's real address exists ONLY here. This is
+    # what separates a LAN gateway box from a local Cline (127.0.0.1)
+    # when neither sets an identity header.
+    try:
+        if request.client and request.client.host:
+            d["caller_ip"] = request.client.host
+    except Exception:
+        pass
+    return d
+
+
+def _origin_label(d: dict) -> str:
+    """One short human string for the row, e.g. 'wuphf/researcher · task-1841'."""
+    if not d:
+        return ""
+    who = d.get("origin") or d.get("agent") or d.get("user") or d.get("title") or d.get("referer")
+    what = d.get("task") or d.get("task_id") or d.get("session") or d.get("session_id")
+    return " · ".join(x for x in (who, what) if x)[:160]
+
+
 def _record_proxy_call(path: str, model: str, backend: str, status: int,
                        latency_s: float, in_tok, out_tok, tok_s, prompt: str,
-                       num_ctx=None, est_gb=None):
+                       num_ctx=None, est_gb=None, output: str = "", origin: dict | None = None):
     ts = time.time()
     norm = path if path.startswith("/") else "/" + path
     entry = {"at": time.strftime("%H:%M:%S"), "ts": ts, "status": str(status),
              "latency": f"{latency_s:.2f}s", "path": norm, "model": model,
              "backend": backend, "via": "proxy", "prompt": prompt,
+             # what actually came BACK — the half the task stream never had, so a bad
+             # reply was invisible and only its token count showed up.
+             "output": output,
              "in_tok": in_tok, "eval_tokens": out_tok, "tok_s": tok_s,
-             "num_ctx": num_ctx, "est_gb": round(est_gb, 1) if est_gb else None}
+             "num_ctx": num_ctx, "est_gb": round(est_gb, 1) if est_gb else None,
+             # who asked for it — the join back to the caller's own logs
+             "origin": _origin_label(origin or {}) or None,
+             "origin_detail": origin or None}
     _recent_calls.append(entry)
     _proxy_recent.append((norm, ts))
 
@@ -1515,6 +2606,37 @@ async def llm_proxy(backend: str, path: str, request: Request):
     url = f"{base}/{path}"
     job_id = f"proxy-{backend}-{secrets.token_hex(4)}"
 
+    # Honest-endpoint rewrite: ollama clients (Goose/OpenCode) auto-detect a model's
+    # context window from /api/show's model_info.*.context_length. Left unmodified,
+    # that's the model's NATIVE max — which can far exceed what the governor's memory
+    # budget can actually hold, so a client-side auto-sized ctx can blow the box. Rewrite
+    # every *.context_length to a memory-safe ceiling instead. Not gated through admission
+    # (it's metadata, not an inference call) and never blocks — any failure falls back to
+    # forwarding the upstream response verbatim.
+    if backend == "ollama" and path == "api/show":
+        await _ollama_meta(model)   # populate gate's kv_rate for this model
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, content=raw,
+                                      headers={"content-type": "application/json"})
+            data = r.json()
+            info = data.get("model_info") or {}
+            arch = info.get("general.architecture")
+            native = int(info.get(f"{arch}.context_length") or 0) if arch else 0
+            safe = _governor_safe_ctx(model, native)
+            for k in list(info.keys()):
+                if k.endswith("context_length"):
+                    info[k] = safe
+            data["model_info"] = info
+            return JSONResponse(data, status_code=r.status_code)
+        except Exception:
+            # never let a rewrite bug break /api/show — forward unmodified
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(url, content=raw,
+                                      headers={"content-type": "application/json"})
+            return Response(content=r.content, status_code=r.status_code,
+                            media_type=r.headers.get("content-type", "application/json"))
+
     # Auto-size the context window to the prompt so long inputs aren't silently truncated
     # at the cheap default. Ollama-only (num_ctx is Ollama's knob); OpenAI sidecars manage
     # their own context. If we grow it, re-serialize the body so the runner gets num_ctx.
@@ -1524,7 +2646,7 @@ async def llm_proxy(backend: str, path: str, request: Request):
     est_hint = 0.0
     if backend == "ollama" and path in ("api/chat", "api/generate"):
         meta = await _ollama_meta(model)
-        chosen_ctx = _autosize_ctx(body, meta["native_ctx"], _prompt_chars(body))
+        chosen_ctx = _autosize_ctx(body, model, meta["native_ctx"], _prompt_chars(body))
         if chosen_ctx:
             body.setdefault("options", {})["num_ctx"] = chosen_ctx
             raw = json.dumps(body).encode()
@@ -1543,6 +2665,13 @@ async def llm_proxy(backend: str, path: str, request: Request):
         await asyncio.sleep(1.0)
 
     fwd_headers = {"content-type": request.headers.get("content-type", "application/json")}
+    # Pass identity headers through rather than swallowing them — a backend or a
+    # downstream proxy may want the same attribution we are recording.
+    for _h in ("x-atelier-origin", "x-atelier-agent", "x-atelier-task",
+               "x-atelier-session", "x-title", "http-referer"):
+        if request.headers.get(_h):
+            fwd_headers[_h] = request.headers[_h]
+    origin = _extract_origin(request, body)
     t0 = time.time()
     if is_stream:
         media = "text/event-stream" if path.startswith("v1/") else "application/x-ndjson"
@@ -1561,7 +2690,8 @@ async def llm_proxy(backend: str, path: str, request: Request):
                 in_tok, out_tok, tok_s = _usage_from_stream(bytes(buf), backend)
                 _record_proxy_call(path, model, backend, status or 200,
                                    time.time() - t0, in_tok, out_tok, tok_s, prompt,
-                                   num_ctx=chosen_ctx, est_gb=est_hint)
+                                   num_ctx=chosen_ctx, est_gb=est_hint,
+                                   output=_output_from_stream(bytes(buf)), origin=origin)
                 if lease:
                     await gate.release(job_id=job_id)
 
@@ -1571,18 +2701,72 @@ async def llm_proxy(backend: str, path: str, request: Request):
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             r = await client.post(url, content=raw, headers=fwd_headers)
+        out_text = ""
         try:
-            in_tok, out_tok, tok_s = _usage_from_obj(r.json())
+            j = r.json()
+            in_tok, out_tok, tok_s = _usage_from_obj(j)
+            out_text = _extract_output(j)
         except Exception:
             in_tok = out_tok = tok_s = None
         _record_proxy_call(path, model, backend, r.status_code, time.time() - t0,
-                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
+                           in_tok, out_tok, tok_s, prompt, num_ctx=chosen_ctx,
+                           est_gb=est_hint, output=out_text, origin=origin)
         return Response(content=r.content, status_code=r.status_code,
                         media_type=r.headers.get("content-type", "application/json"))
     except Exception as e:
         _record_proxy_call(path, model, backend, 502, time.time() - t0,
-                           None, None, None, prompt, num_ctx=chosen_ctx, est_gb=est_hint)
+                           None, None, None, prompt, num_ctx=chosen_ctx, est_gb=est_hint,
+                           output=f"▲ proxy→{backend} failed: {e}", origin=origin)
         return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
     finally:
         if lease:
             await gate.release(job_id=job_id)
+
+
+# ---------- DROP-IN ollama surface: the governor answers ollama's own API shape ----------
+# Asking every client to rewrite its URL to /llm/ollama/... is the wrong ask on a machine
+# we own — and it is why traffic keeps escaping capture: Cline, LiteLLM and anything else
+# that only exposes a "base URL" setting cannot add a path prefix. Ollama's own logs are no
+# fallback: even at --log-verbosity 4 they record token COUNTS (task.n_tokens = 2156), never
+# prompt text, so a bypassed call is genuinely unrecoverable after the fact.
+#
+# So the governor speaks ollama natively at its root. A client changes ONLY the port
+# (11434 -> 8799) and every call is captured, with no path rewriting anywhere.
+# For fully transparent capture (zero client changes), move ollama to 11435 and let the
+# governor own 11434 — same code path, see docs.
+@app.post("/api/{path:path}")
+async def ollama_compat_post(path: str, request: Request):
+    return await llm_proxy("ollama", f"api/{path}", request)
+
+
+@app.get("/api/{path:path}")
+async def ollama_compat_get(path: str, request: Request):
+    return await llm_proxy_get("ollama", f"api/{path}", request)
+
+
+@app.post("/v1/{path:path}")
+async def openai_compat_post(path: str, request: Request):
+    return await llm_proxy("ollama", f"v1/{path}", request)
+
+
+@app.get("/v1/{path:path}")
+async def openai_compat_get(path: str, request: Request):
+    return await llm_proxy_get("ollama", f"v1/{path}", request)
+
+
+@app.get("/llm/{backend}/{path:path}")
+async def llm_proxy_get(backend: str, path: str, request: Request):
+    """GET passthrough for the metadata/listing calls ollama clients make (api/tags,
+    api/version, v1/models) — the POST-only proxy above 404s on these, which breaks
+    client auto-configuration before it even gets to a chat/generate call."""
+    base = LLM_ROUTE_BASE.get(backend)
+    if not base:
+        return JSONResponse({"ok": False, "error": f"unknown backend '{backend}' "
+                             f"(use {list(LLM_ROUTE_BASE)})"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{base}/{path}", params=dict(request.query_params))
+        return Response(content=r.content, status_code=r.status_code,
+                        media_type=r.headers.get("content-type", "application/json"))
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
