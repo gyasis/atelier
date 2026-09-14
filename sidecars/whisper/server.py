@@ -408,11 +408,11 @@ def _format_body(result: dict, fmt: str):
     if fmt == "vtt":
         return _to_vtt(segs), "text/vtt"
     if fmt == "verbose_json":
-        return result, "application/json"
+        return _json_safe(result), "application/json"
     # default "json": the lean {text, segments, language} shape from ARCHITECTURE §5.2
-    return {"text": result.get("text", "").strip(),
-            "language": result.get("language"),
-            "segments": _trim_segments(segs)}, "application/json"
+    return _json_safe({"text": result.get("text", "").strip(),
+                       "language": result.get("language"),
+                       "segments": _trim_segments(segs)}), "application/json"
 
 
 def _save_output(result: dict, sha: str, fmt: str, output_path: str | None) -> str:
@@ -1119,8 +1119,9 @@ def job_result(job_id: str, request: Request):
         raise HTTPException(404, "no such job")
     if job["status"] != "done":
         raise HTTPException(409, f"job not done (status={job['status']})")
-    return {"job_id": job_id, "sha256": job.get("sha256"), "model": job.get("model"),
-            "saved_path": job.get("saved_path"), "result": job.get("result")}
+    return _json_safe({"job_id": job_id, "sha256": job.get("sha256"),
+                       "model": job.get("model"), "saved_path": job.get("saved_path"),
+                       "result": job.get("result")})
 
 
 @app.get("/jobs/{job_id}/stream")
