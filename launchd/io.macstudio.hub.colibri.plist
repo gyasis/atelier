@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.macstudio.hub.colibri</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>COLIBRI_PORT</key>
+		<string>8783</string>
+		<key>COLIBRI_CHILD_PORT</key>
+		<string>18783</string>
+		<key>COLIBRI_HOME</key>
+		<string>/Users/gyasisutton/services/colibri-sidecar/colibri</string>
+		<key>IDLE_UNLOAD_SECONDS</key>
+		<string>600</string>
+		<key>GOVERNOR_URL</key>
+		<string>http://127.0.0.1:8799</string>
+		<key>PATH</key>
+		<string>/Users/gyasisutton/services/colibri-sidecar/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/caffeinate</string>
+		<string>-i</string>
+		<string>/Users/gyasisutton/services/colibri-sidecar/.venv/bin/python</string>
+		<string>-m</string>
+		<string>uvicorn</string>
+		<string>server:app</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8783</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/gyasisutton/Library/Logs/colibri-sidecar.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/gyasisutton/Library/Logs/colibri-sidecar.out.log</string>
+	<key>WorkingDirectory</key>
+	<string>/Users/gyasisutton/services/colibri-sidecar</string>
+</dict>
+</plist>
