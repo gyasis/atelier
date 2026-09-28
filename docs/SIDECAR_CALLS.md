@@ -13,6 +13,7 @@ copy-paste quick-reference distilled from those manifests. Ports are loopback; s
 | omnivoice | 8770 | TTS — primary, instruct-driven accent/tone + cloning | ✓ live |
 | llamacpp | 8771 | LLM — llama.cpp (GGUF, Metal), OpenAI-compatible | ✓ live |
 | mlxlm | 8773 | LLM — Apple mlx_lm (MLX), OpenAI-compatible | ✓ live |
+| colibri | 8783 | LLM — Colibri huge-MoE streamed from SSD; OVERNIGHT jobs + brio | ✓ live (tests: tiny fixture) |
 | fastmlx | 8772 | LLM/VLM — MLX-native | ✗ blocked (upstream) |
 | medner | 8131 | NER — medical entity extraction (GLiNER + d4data + scispaCy) | ✓ live (on-demand) |
 | radiogen | 8774 | Imaging — synthetic chest X-ray (diffusers SD) → DICOM | ✓ live |
@@ -114,6 +115,24 @@ curl -s http://127.0.0.1:8773/v1/chat/completions -H 'content-type: application/
 Also: `POST /v1/completions`, `GET /v1/models`, `POST /admin/unload`.
 
 ---
+
+### colibri (8783) — huge MoE from SSD, OVERNIGHT · model alias `colibri-qwen36`
+
+Slow by design (fractions of a token/s up to a few). Submit and collect later; never set a
+read timeout. Full runbook: `sidecars/colibri/README.md`.
+
+```bash
+# overnight job (persisted, queued, governor lease renewed while it runs)
+curl -s http://<mac-host>:8783/jobs -H 'content-type: application/json' \
+  -d '{"path":"v1/chat/completions","body":{"messages":[{"role":"user","content":"hi"}],"max_tokens":256}}'
+curl -s http://<mac-host>:8783/jobs/<job_id>
+# closed-set scoring (no generation, returns entropy)
+curl -s http://<mac-host>:8783/jobs -H 'content-type: application/json' \
+  -d '{"path":"v1/brio","body":{"state":"...","question":"Ship?","options":["yes","no"]}}'
+# short sync call through the governor
+curl -s http://<mac-host>:8799/llm/colibri/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"colibri-qwen36","messages":[{"role":"user","content":"hi"}],"max_tokens":32}'
+```
 
 ## Imaging generation
 

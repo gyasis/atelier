@@ -1,0 +1,17 @@
+{
+  "default": "colibri-qwen36",
+  "models": {
+    "colibri-qwen36": {
+      "path": "~/models/colibri/qwen36_i4_gs64",
+      "ram": 10,
+      "args": ["--kv-slots", "1"],
+      "note": "ram = coli --ram cap AND the governor admission estimate. ~5 GB measured on short runs."
+    },
+    "colibri-olmoe-tiny": {
+      "path": "~/models/colibri/olmoe_tiny",
+      "ram": 1,
+      "args": ["--kv-slots", "1"],
+      "note": "TEST FIXTURE ONLY - random weights (tools/make_olmoe_tiny.py); exercises engine + gateway."
+    }
+  }
+}

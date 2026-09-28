@@ -101,6 +101,7 @@ SIDECAR_BASE = {
     "rerank": "http://127.0.0.1:8778",
     "pyannote": "http://127.0.0.1:8767",
     "audio-llm": "http://127.0.0.1:8768",
+    "colibri": "http://127.0.0.1:8783",
 }
 SIDECARS = {name: f"{base}/readyz" for name, base in SIDECAR_BASE.items()}
 SIDECAR_LOGS = {
@@ -117,6 +118,7 @@ SIDECAR_LOGS = {
     "rerank": Path.home() / "Library/Logs/rerank-sidecar.out.log",
     "pyannote": Path.home() / "Library/Logs/pyannote-sidecar.out.log",
     "audio-llm": Path.home() / "Library/Logs/audio-llm-sidecar.out.log",
+    "colibri": Path.home() / "Library/Logs/colibri-sidecar.out.log",
 }
 # launchd labels — used by (c) /force-stop --hard to kickstart -k a wedged sidecar.
 SIDECAR_LABELS = {
@@ -136,6 +138,7 @@ SIDECAR_LABELS = {
     "rerank": "io.macstudio.hub.rerank",
     "pyannote": "io.macstudio.hub.pyannote",
     "audio-llm": "io.macstudio.hub.audio-llm",
+    "colibri": "io.macstudio.hub.colibri",
 }
 
 # ---------- LLM admission gate (the request-path queue) ----------
@@ -152,6 +155,9 @@ _EST_OVERRIDES = {
     # fastcontext-{rl,sft}: 4B Qwen3 GGUF, alias has no "4b" so the name heuristic
     # falls to the 18GB blind default → spurious admit-hang. Real resident ~13GB @ 64K ctx.
     "fastcontext": 13.0,
+    # colibri-*: Colibri streams experts from SSD; resident is capped by its --ram budget
+    # (registry `ram`, 10 GB). Measured ~5 GB for qwen36 on short runs (2026-09-28).
+    "colibri-": 10.0,
 }
 LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
 gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,
@@ -856,9 +862,19 @@ async def _poller():
 # Phase 4: which backends the gate can route across, and where to reach them.
 LLM_ROUTE_BASE = {"ollama": OLLAMA_URL,
                   "mlxlm": SIDECAR_BASE.get("mlxlm", ""),
-                  "llamacpp": SIDECAR_BASE.get("llamacpp", "")}
+                  "llamacpp": SIDECAR_BASE.get("llamacpp", ""),
+                  "colibri": SIDECAR_BASE.get("colibri", "")}
 _tags_last = 0.0
 _sidecar_models: dict[str, str] = {}   # backend → the single model it currently serves
+
+
+LLM_SIDECARS = ("mlxlm", "llamacpp", "colibri")   # sidecars that hold an LLM under a lease
+
+
+def _warm_llm_sidecar(t: dict) -> bool:
+    """A sidecar tenant that is an LLM backend with a model actually loaded right now."""
+    return (t.get("tenant") == "atelier" and t.get("name") in LLM_SIDECARS and bool(t.get("model"))
+            and t.get("state") not in (None, "cold", "unreachable"))
 
 
 async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]):
@@ -881,7 +897,7 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
             catalog["ollama"] = [m["name"] for m in tags]
         except Exception:
             pass
-        for be in ("mlxlm", "llamacpp"):       # each LLM sidecar serves one configured model
+        for be in LLM_SIDECARS:                  # each LLM sidecar serves one configured model
             try:
                 d = (await client.get(f"{SIDECAR_BASE[be]}/readyz", timeout=3)).json()
                 if d.get("model"):
@@ -896,16 +912,24 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
               for t in tenants if t.get("tenant") == "ollama" and t.get("name")]
     # sidecars never take a lease, so their measured RSS is pure untracked load — count it,
     # else /budget under-reports (the 21GB-omnivoice blind spot) and the budget path is blind.
-    loaded += [{"backend": "atelier", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
+    # LLM sidecars take leases under (backend, model alias). Report a WARM one's RSS under that
+    # same pair, so a lease on the loaded model is not ALSO charged its resident memory as
+    # untracked (measured 2026-09-28: a warm colibri-qwen36 blocked admission of colibri-qwen36 —
+    # the model blocked itself; llamacpp/mlxlm had the identical double count). A cold sidecar
+    # still reports a model name (mlxlm does), so gate on state, not on the name.
+    loaded += [{"backend": t["name"], "model": t["model"], "gb": t.get("mem_gb", 0.0)}
+               if _warm_llm_sidecar(t) else
+               {"backend": "atelier", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
                for t in tenants if t.get("tenant") == "atelier" and t.get("mem_gb")]
     gate.set_untracked_gb(gate.untracked_from(loaded))
     # (d) loaded set for routing: Ollama resident models + any warm LLM sidecar
     loaded_set = {("ollama", t["name"]) for t in tenants
                   if t.get("tenant") == "ollama" and t.get("name")}
-    for be in ("mlxlm", "llamacpp"):
-        st = next((t.get("state") for t in tenants if t.get("name") == be), None)
-        if be in _sidecar_models and st not in (None, "cold", "unreachable"):
-            loaded_set.add((be, _sidecar_models[be]))
+    # the loaded model comes from THIS poll: the _sidecar_models cache refreshes only every 60 s,
+    # which is long enough to refuse (or double-charge) a request for the model already warm.
+    for t in tenants:
+        if _warm_llm_sidecar(t):
+            loaded_set.add((t["name"], t["model"]))
     gate.set_loaded(loaded_set)
     # (e) warm KV rate for loaded Ollama models so DIRECT /admit callers also get accurate
     # est (cached after first fetch — just dict hits thereafter).
@@ -1442,9 +1466,10 @@ SIDECAR_ROLES = {
     "rerank": "Rerank — cross-encoder BAAI/bge-reranker-v2-m3 (query,passages→scores) (MPS)",
     "pyannote": "Diarization — speaker diarization (pyannote.audio): who-spoke-when (MPS)",
     "audio-llm": "Audio understanding — classify/describe an audio track (multi-model: Qwen2-Audio/Voxtral/Qwen3-Omni, MLX)",
+    "colibri": "LLM — Colibri huge-MoE (experts streamed from SSD), OpenAI-compatible + brio; OVERNIGHT/batch via POST /jobs",
 }
 AGENT_CAPABLE = {"whisper", "omnivoice", "kokoro", "dia", "llamacpp", "fastmlx", "mlxlm", "medner",
-                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm", "pronounce"}
+                 "tabfm", "colpali", "rerank", "pyannote", "audio-llm", "pronounce", "colibri"}
 
 # Present on the box but NOT governed sidecars (no admit/unload contract). Surfaced in /agent so
 # an agent has the COMPLETE picture — but the governor CANNOT admit/evict these; their memory sits
@@ -2226,6 +2251,12 @@ async def release(req: ReleaseReq):
 # OPT-IN: only callers who choose this URL flow through it; direct callers are untouched.
 # Streams transparently (Ollama ndjson + OpenAI SSE), capturing the final token counts.
 PROXY_MAX_WAIT_S = float(os.environ.get("ATELIER_PROXY_MAX_WAIT_S", "600"))
+# Backends that must NEVER wait in the FIFO queue or fail open. A colibri model is ~26 GB and slow:
+# parked at the queue head it blocks every small call behind it (measured 2026-09-28), and failing
+# open after PROXY_MAX_WAIT_S would load it UNGATED. So: one admit attempt; if not granted, leave
+# the queue and answer 503 pointing at the sidecar's own overnight queue (POST :8783/jobs).
+PROXY_NO_QUEUE_BACKENDS = set(filter(None, os.environ.get("ATELIER_PROXY_NO_QUEUE_BACKENDS",
+                                                          "colibri").split(",")))
 
 # --- auto-size num_ctx to the prompt (so long inputs aren't silently truncated) ---
 PROXY_CTX_DEFAULT = int(os.environ.get("OLLAMA_CONTEXT_LENGTH", "16384"))  # the cheap baseline window
@@ -2589,6 +2620,24 @@ def _record_proxy_call(path: str, model: str, backend: str, status: int,
     _proxy_recent.append((norm, ts))
 
 
+# A proxied call can outlive its lease: leases expire after LLM_LEASE_TTL_S (900 s) and the
+# forward below has no read timeout. An overnight colibri generation would otherwise lose its
+# memory reservation mid-run and let the gate admit another model on top of it. Re-admitting
+# the same job_id renews the lease (admission.py step 0), so renew it while the call runs.
+PROXY_LEASE_RENEW_S = float(os.environ.get("ATELIER_PROXY_LEASE_RENEW_S", str(max(30.0, LLM_LEASE_TTL_S / 3))))
+
+
+def _lease_heartbeat(job_id: str, model: str, backend: str, est_gb: float) -> asyncio.Task:
+    async def _beat():
+        while True:
+            await asyncio.sleep(PROXY_LEASE_RENEW_S)
+            try:
+                await gate.admit(job_id, model, backend=backend, est_gb=est_gb)
+            except Exception as e:
+                print(f"[governor] lease renew failed for {job_id}: {e}", flush=True)
+    return asyncio.create_task(_beat())
+
+
 @app.post("/llm/{backend}/{path:path}")
 async def llm_proxy(backend: str, path: str, request: Request):
     base = LLM_ROUTE_BASE.get(backend)
@@ -2660,6 +2709,13 @@ async def llm_proxy(backend: str, path: str, request: Request):
         if d.grant:
             lease = d
             break
+        if backend in PROXY_NO_QUEUE_BACKENDS:
+            await gate.release(job_id=job_id)          # step out of the line; never block others
+            return JSONResponse({"ok": False, "error": "not admitted now", "reason": d.reason,
+                                 "backend": backend,
+                                 "hint": "slow backend: submit to its overnight queue instead "
+                                         "(colibri: POST :8783/jobs) — it waits without blocking "
+                                         "other callers"}, status_code=503)
         if time.time() - start > PROXY_MAX_WAIT_S:
             break   # fail-open: proceed ungated rather than hang the caller
         await asyncio.sleep(1.0)
@@ -2673,6 +2729,7 @@ async def llm_proxy(backend: str, path: str, request: Request):
             fwd_headers[_h] = request.headers[_h]
     origin = _extract_origin(request, body)
     t0 = time.time()
+    heartbeat = _lease_heartbeat(job_id, model, backend, est_hint) if lease else None
     if is_stream:
         media = "text/event-stream" if path.startswith("v1/") else "application/x-ndjson"
 
@@ -2692,6 +2749,8 @@ async def llm_proxy(backend: str, path: str, request: Request):
                                    time.time() - t0, in_tok, out_tok, tok_s, prompt,
                                    num_ctx=chosen_ctx, est_gb=est_hint,
                                    output=_output_from_stream(bytes(buf)), origin=origin)
+                if heartbeat:
+                    heartbeat.cancel()
                 if lease:
                     await gate.release(job_id=job_id)
 
@@ -2719,6 +2778,8 @@ async def llm_proxy(backend: str, path: str, request: Request):
                            output=f"▲ proxy→{backend} failed: {e}", origin=origin)
         return JSONResponse({"ok": False, "error": f"proxy→{backend} failed: {e}"}, status_code=502)
     finally:
+        if heartbeat and not is_stream:
+            heartbeat.cancel()
         if lease:
             await gate.release(job_id=job_id)
 
