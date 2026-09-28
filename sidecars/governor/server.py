@@ -156,8 +156,9 @@ _EST_OVERRIDES = {
     # falls to the 18GB blind default → spurious admit-hang. Real resident ~13GB @ 64K ctx.
     "fastcontext": 13.0,
     # colibri-*: Colibri streams experts from SSD; resident is capped by its --ram budget
-    # (registry `ram`, 10 GB). Measured ~5 GB for qwen36 on short runs (2026-09-28).
-    "colibri-": 10.0,
+    # (registry `ram`). qwen36 ignores --ram; memory is set by --cap. Measured at --cap 256:
+    # 14.0 GB RSS (2026-09-28) → estimate 16.
+    "colibri-": 16.0,
 }
 LLM_LIVE_FLOOR_GB = float(os.environ.get("ATELIER_LLM_LIVE_FLOOR_GB", "4"))
 gate = admission.Gate(budget_gb=LLM_BUDGET_GB, default_est_gb=LLM_DEFAULT_EST_GB,

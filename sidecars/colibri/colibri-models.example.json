@@ -3,14 +3,28 @@
   "models": {
     "colibri-qwen36": {
       "path": "~/models/colibri/qwen36_i4_gs64",
-      "ram": 10,
-      "args": ["--kv-slots", "1"],
-      "note": "ram = coli --ram cap AND the governor admission estimate. ~5 GB measured on short runs."
+      "ram": 16,
+      "args": [
+        "--kv-slots",
+        "1",
+        "--ctx",
+        "65536",
+        "--no-think",
+        "--cap",
+        "256"
+      ],
+      "note": "ram = governor estimate only (qwen36 ignores --ram); memory/speed set by --cap. cap 256: 14.0 GB RSS, 2.7 tok/s measured. env COLI_TOOL_FALLBACK=1 = experimental prompt-injected tool calls (qwen36 has no native tool support).",
+      "env": {
+        "COLI_TOOL_FALLBACK": "1"
+      }
     },
     "colibri-olmoe-tiny": {
       "path": "~/models/colibri/olmoe_tiny",
       "ram": 1,
-      "args": ["--kv-slots", "1"],
+      "args": [
+        "--kv-slots",
+        "1"
+      ],
       "note": "TEST FIXTURE ONLY - random weights (tools/make_olmoe_tiny.py); exercises engine + gateway."
     }
   }

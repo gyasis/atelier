@@ -66,7 +66,7 @@ while a job runs = stuck. Unstick with `POST /admin/unload?force=true` (kills th
 | **admission yields** | a `/jobs` job retries admission politely (outside the governor queue) instead of failing open. `COLIBRI_ADMIT_MAX_WAIT_S=0` (default) = keep trying forever. |
 | **no-queue proxy** | `ATELIER_PROXY_NO_QUEUE_BACKENDS=colibri`: one admit attempt, else 503 — never the 600 s wait + ungated fail-open other backends get. |
 | **resident = recognised** | the governor reports colibri's RSS under (colibri, loaded model) and adds it to the loaded set from each poll, so a warm model is reused at 0 GB instead of blocking its own admission. |
-| **estimate** | registry `ram` is both Colibrì's `--ram` budget and the admission estimate. The proxy path uses the governor's `"colibri-"` override (10 GB). |
+| **estimate** | registry `ram` is the governor's admission ESTIMATE. It is also passed as `--ram`, but **the qwen36 engine ignores `--ram`** (upstream `docs/qwen36.md`): its memory is set by `--cap`. Keep `ram` ≥ the measured RSS for the chosen cap. The proxy path uses the governor's `"colibri-"` override (16 GB). |
 | **registration** | `SIDECAR_BASE/LABELS/LOGS/ROLES/AGENT_CAPABLE` + `LLM_ROUTE_BASE["colibri"]` → shows in `GET :8799/agent?expand=true`. |
 
 ## Process safety (the ghost-engine problem)
@@ -85,7 +85,9 @@ a multi-GB engine. So:
 ```json
 {"default": "colibri-qwen36",
  "models": {
-   "colibri-qwen36":     {"path": "~/models/colibri/qwen36_i4_gs64", "ram": 10, "args": ["--kv-slots","1"]},
+   "colibri-qwen36":     {"path": "~/models/colibri/qwen36_i4_gs64", "ram": 16,
+                         "args": ["--kv-slots","1","--ctx","65536","--no-think","--cap","256"],
+                         "env": {"COLI_TOOL_FALLBACK": "1"}},
    "colibri-olmoe-tiny": {"path": "~/models/colibri/olmoe_tiny",     "ram": 1,  "args": ["--kv-slots","1"]}}}
 ```
 
@@ -106,12 +108,58 @@ registry entry, `launchctl kickstart -k gui/$(id -u)/io.macstudio.hub.colibri`.
 | generation | ~1.0–1.1 tok/s (128 tokens ≈ 2 min) |
 | cold load | ~7 s |
 | resident | ~5 GB process tree at `--ram 26` (the cap is a ceiling for the expert cache, not the footprint) |
-| cap now | `ram: 10` (2026-09-28) — cap and admission estimate lowered together; 26 was ~5x the measured footprint and kept the job waiting for room |
+| cap now | `--cap 256`, estimate `ram: 16` (2026-09-28) — see the correction below |
 | page cache | +0.1 GB — streaming did not inflate the governor's "resident" figure for this model |
 | Brio, 1 yes/no question | ~47 s (prefill-bound) |
 
-`ram` is both the `--ram` cap (so resident can never exceed it) and the governor estimate — they
-move together, so the estimate cannot understate. An example registry is `colibri-models.example.json`.
+**Correction (2026-09-28).** This file previously said `ram` is "the `--ram` cap AND the governor
+estimate, so the estimate cannot understate". That is **false for qwen36**: the engine never reads
+`--ram` (upstream `docs/qwen36.md`, "`--ram` is not honoured by this engine"). Memory and speed are set
+by **`--cap N`** — expert cache slots per layer (of 256). The default cap (8) streamed nearly every
+expert from SSD. What follows: `ram` is only an estimate, so it must be set from a MEASURED RSS for
+the cap in use, and a cap change needs a re-measure. An example registry is `colibri-models.example.json`.
+
+| `--cap` | resident (measured) | generation | Brio, 1 question |
+|---|---|---|---|
+| 8 (default) | ~5 GB | ~1.05 tok/s | ~47 s |
+| **256 (now)** | **~14 GB** | **~2.7 tok/s** | **~19 s** |
+
+Upstream measures 12.8–15.7 tok/s at cap 256 on an AVX-512 x86 box; its batched CPU prefill is
+AVX2-only, which is a likely (unmeasured) part of the M1 Max gap.
+
+## Driving a coding agent (pi) with Colibri — measured 2026-09-28
+
+pi provider (`~/.pi/agent/models.json`), through the governor so the call is admitted and its lease
+renewed:
+
+```json
+"atelier-colibri": {"baseUrl": "http://<mac-host>:8799/llm/colibri/v1", "api": "openai-completions",
+  "apiKey": "unused-local", "models": [{"id": "colibri-qwen36", "reasoning": false,
+  "input": ["text"], "contextWindow": 65536, "maxTokens": 4096}]}
+```
+```bash
+pi -p --provider atelier-colibri --model colibri-qwen36 --thinking off \
+   --no-extensions --no-skills --no-prompt-templates -a "<task>"
+```
+
+Result on a one-bug repo (fix `add()`, run pytest): **fixed and verified in 4 rounds, 37 min**
+(489 / 596 / 597 / 565 s per round, ~1.9–2.5K prompt tokens each), Mac 84–86% free throughout,
+no swap growth. What it took:
+
+| problem | fix |
+|---|---|
+| qwen36 has no native tool calling (HTTP 400) | registry `env: {"COLI_TOOL_FALLBACK": "1"}` (prompt-injected tools) |
+| the fallback prompt showed a bare `{function-name}` template; Qwen3.6 copied it literally and put the tool name in `<arg_key>`, and the parser then used the WHOLE box as the name → pi rejected every call, forever | `patches/0001-qwen36-tool-fallback.patch`: a concrete example + the list of legal names in the prompt, and a narrow, logged repair for that exact shape. With it the model emitted correct calls unaided. |
+| engine default `--ctx 8192` < a pi conversation | `--ctx 65536` (native max 262,144; only 10 of 40 layers hold KV) |
+| hybrid thinking model at ~2 tok/s | `--no-think` |
+| pi's HTTP client times out at 10 min | not hit: the governor streams headers at once, so the SDK's header timeout never fires (observed: 19-min round at cap 8 completed) |
+
+Not solved: **no prefix reuse across rounds** — each round re-reads the whole conversation (DeltaNet
+state is not checkpointed for qwen36), so rounds stay ~10 min instead of shrinking.
+
+**Upgrading Colibri drops the patch.** Re-apply after any `git pull` in the checkout:
+`git -C ~/services/colibri-sidecar/colibri apply sidecars/colibri/patches/0001-qwen36-tool-fallback.patch`
+(then restart the sidecar). The patch is also worth offering upstream.
 
 ## Tests
 

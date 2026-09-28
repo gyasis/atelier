@@ -1,0 +1,52 @@
+diff --git a/c/openai_server.py b/c/openai_server.py
+index 488aefc..330dd82 100644
+--- a/c/openai_server.py
++++ b/c/openai_server.py
+@@ -321,6 +321,26 @@ def _fallback_tool_preamble(tools):
+                "else, in this exact format:\n" + BOX_START + "{function-name}"
+                "<arg_key>{arg-key}</arg_key><arg_value>{arg-value}</arg_value>"
+                + BOX_END)
++    # A bare template gets copied literally: Qwen3.6 emitted "{function-name}" and put the
++    # tool's name in <arg_key> (measured 2026-09-28, atelier colibri sidecar + pi). A concrete
++    # example built from a DECLARED tool, and the list of legal names, removes the ambiguity.
++    names, example = [], None
++    for tool in tools:
++        fn = tool.get("function", tool) if isinstance(tool, dict) else {}
++        if not fn.get("name"):
++            continue
++        names.append(fn["name"])
++        if example is None:
++            params = (fn.get("parameters") or {})
++            keys = list(params.get("required") or []) or list((params.get("properties") or {}))
++            if keys:
++                example = (fn["name"], keys[0])
++    if names:
++        out.append("\n\nReplace {function-name} with one of: " + ", ".join(names)
++                   + ". Each <arg_key> is a parameter name of that function.")
++    if example:
++        out.append("\nExample: " + BOX_START + example[0] + "<arg_key>" + example[1]
++                   + "</arg_key><arg_value>...</arg_value>" + BOX_END)
+     return "".join(out)
+ 
+ 
+@@ -504,6 +524,20 @@ def parse_tool_calls(reply, tools=None):
+         for arg in _ARG_RE.finditer(inner):
+             key, value = arg.group(1), arg.group(2)
+             args[key] = _coerce_arg(value, types.get(key))
++        # Placeholder repair (local patch, 2026-09-28). The model copied the template's literal
++        # "{function-name}" and wrote the real tool name as the ONLY <arg_key>. Without this the
++        # whole raw box became the tool name. Narrow on purpose: only a {placeholder} name, only
++        # a single arg whose key IS a declared tool; the value goes to that tool's first param.
++        placeholder = re.match(r"\s*\{[^}<]*\}", inner)
++        if (placeholder and name not in param_order and len(args) == 1
++                and next(iter(args)) in param_order and param_order[next(iter(args))]):
++            real = next(iter(args))
++            raw = next(_ARG_RE.finditer(inner)).group(2)
++            key = param_order[real][0]
++            args = {key: _coerce_arg(raw, param_types.get(real, {}).get(key))}
++            sys.stderr.write(f"[api] repaired placeholder tool call -> {real}({key}=...)\n")
++            sys.stderr.flush()
++            name = real
+         if not args and _SALVAGE:
+             rest = inner[name_match.end():] if name_match else ""
+             payload = _TAG_RE.sub("", rest).strip()
