@@ -98,7 +98,9 @@ def _load_registry() -> tuple[dict, str | None]:
                 args = spec.get("args") or []
                 reg[alias] = {"path": str(Path(spec["path"]).expanduser()),
                               "ram": float(spec.get("ram", 24)),
-                              "args": args.split() if isinstance(args, str) else list(args)}
+                              "args": args.split() if isinstance(args, str) else list(args),
+                              # per-model engine env, e.g. {"COLI_TOOL_FALLBACK": "1"}
+                              "env": {str(k): str(v) for k, v in (spec.get("env") or {}).items()}}
             default = d.get("default")
         except Exception as e:
             print(f"[colibri] registry config error ({MODELS_CONFIG}): {e}", flush=True)
@@ -201,7 +203,10 @@ async def _start_child(alias: str) -> None:
     print(f"[colibri] starting child ({alias}): {' '.join(cmd)}", flush=True)
     t0 = time.monotonic()
     # start_new_session → own process group, so _stop_child can take the engine down too.
-    _proc = subprocess.Popen(cmd, cwd=str(COLIBRI_HOME / "c"), start_new_session=True)
+    env = {**os.environ, **spec.get("env", {})}
+    if spec.get("env"):
+        print(f"[colibri] child env for {alias}: {spec['env']}", flush=True)
+    _proc = subprocess.Popen(cmd, cwd=str(COLIBRI_HOME / "c"), start_new_session=True, env=env)
     PGID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PGID_FILE.write_text(str(_proc.pid))
     _current_alias, _started_at, _last_start_error = alias, time.time(), None
