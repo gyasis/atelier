@@ -11,7 +11,7 @@
 		<key>COLIBRI_CHILD_PORT</key>
 		<string>18783</string>
 		<key>COLIBRI_HOME</key>
-		<string>/Users/gyasisutton/services/colibri-sidecar/colibri</string>
+		<string>/Users/gyasisutton/services/colibri-sidecar/colibri-active</string>
 		<key>IDLE_UNLOAD_SECONDS</key>
 		<string>600</string>
 		<key>GOVERNOR_URL</key>

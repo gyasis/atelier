@@ -127,7 +127,12 @@ the cap in use, and a cap change needs a re-measure. An example registry is `col
 Upstream measures 12.8–15.7 tok/s at cap 256 on an AVX-512 x86 box; its batched CPU prefill is
 AVX2-only, which is a likely (unmeasured) part of the M1 Max gap.
 
-## Driving a coding agent (pi) with Colibri — measured 2026-09-28
+## Driving a coding agent (pi) with Colibri
+
+**Run it on Colibri's `dev` branch** (built from `eefa57a`, 2026-09-29): it has native Qwen3.6 tool
+calling ([#1794](https://github.com/JustVugg/colibri/pull/1794)) and prefix reuse that survives a
+chat client's round trip ([#1767](https://github.com/JustVugg/colibri/pull/1767)). Neither is in the
+v1.12.1 release.
 
 pi provider (`~/.pi/agent/models.json`), through the governor so the call is admitted and its lease
 renewed:
@@ -142,24 +147,57 @@ pi -p --provider atelier-colibri --model colibri-qwen36 --thinking off \
    --no-extensions --no-skills --no-prompt-templates -a "<task>"
 ```
 
-Result on a one-bug repo (fix `add()`, run pytest): **fixed and verified in 4 rounds, 37 min**
-(489 / 596 / 597 / 565 s per round, ~1.9–2.5K prompt tokens each), Mac 84–86% free throughout,
-no swap growth. What it took:
+Same one-bug task (fix `add()`, run pytest), same flags, `--cap 256`, both runs fixed and verified:
 
-| problem | fix |
+| | v1.12.1 + tool-fallback patch | **dev `eefa57a`** |
+|---|---|---|
+| total | 2,248 s (37 min), 4 rounds | **725 s (12 min), 6 rounds** |
+| round 1 (nothing to reuse) | 489 s | 491 s |
+| later rounds | 565–597 s each (whole conversation re-read) | **21–74 s each** |
+| engine | — | `[PREFIX] reusing 2047 of 2116` … `2888 of 2924` (94–99%) |
+| Mac | 84–86% free, swap flat | 84% free, swap flat |
+
+Controlled A/B on `dev`, same 2-turn tool loop, identical outputs: turn 2 = **29.6 s** with reuse,
+**111.7 s** with `COLI_KV_PREFIX=0`.
+
+### Why later rounds used to cost a full re-read
+
+pi (any OpenAI-style client) resends the whole conversation every turn; the server is supposed to
+notice the new prompt starts with what it already processed and read only the tail. Qwen3.6 is hybrid:
+30 of 40 layers are DeltaNet, which keep one running state instead of a per-token cache, so the state
+**cannot be rewound** — reuse needs the new prompt to match what the engine processed token for token,
+or nothing is reused. The engine generates each reply after an empty `<think></think>` header; the
+official chat template stripped that block from past turns, so the history came back different at the
+first assistant turn and every round paid a full prefill. #1767 renders past turns with the block
+(`preserve_thinking`), so the history round-trips exactly. `COLI_PREFIX_LOG=1` (set in the registry
+`env`) prints the decision per request: `reusing N of M` or `no reuse … (diverged)`.
+
+### What each setting is for
+
+| setting | why |
 |---|---|
-| qwen36 has no native tool calling (HTTP 400) | registry `env: {"COLI_TOOL_FALLBACK": "1"}` (prompt-injected tools) |
-| the fallback prompt showed a bare `{function-name}` template; Qwen3.6 copied it literally and put the tool name in `<arg_key>`, and the parser then used the WHOLE box as the name → pi rejected every call, forever | `patches/0001-qwen36-tool-fallback.patch`: a concrete example + the list of legal names in the prompt, and a narrow, logged repair for that exact shape. With it the model emitted correct calls unaided. |
-| engine default `--ctx 8192` < a pi conversation | `--ctx 65536` (native max 262,144; only 10 of 40 layers hold KV) |
-| hybrid thinking model at ~2 tok/s | `--no-think` |
-| pi's HTTP client times out at 10 min | not hit: the governor streams headers at once, so the SDK's header timeout never fires (observed: 19-min round at cap 8 completed) |
+| `--ctx 65536` | engine default 8192 < a pi conversation (native max 262,144; only 10 of 40 layers hold KV) |
+| `--no-think` | hybrid thinking model at ~2.7 tok/s |
+| `--cap 256` | expert cache slots/layer: ~14 GB, ~2.7 tok/s (cap 8: ~5 GB, ~1 tok/s) |
+| `env COLI_PREFIX_LOG=1` | make the reuse decision observable |
+| pi's 10-min HTTP timeout | not hit: the governor streams headers at once (a 19-min round completed) |
 
-Not solved: **no prefix reuse across rounds** — each round re-reads the whole conversation (DeltaNet
-state is not checkpointed for qwen36), so rounds stay ~10 min instead of shrinking.
+### Switching Colibri builds
 
-**Upgrading Colibri drops the patch.** Re-apply after any `git pull` in the checkout:
-`git -C ~/services/colibri-sidecar/colibri apply sidecars/colibri/patches/0001-qwen36-tool-fallback.patch`
-(then restart the sidecar). The patch is also worth offering upstream.
+The sidecar runs whatever `~/services/colibri-sidecar/colibri-active` points at (plist `COLIBRI_HOME`):
+
+```bash
+cd ~/services/colibri-sidecar
+ln -sfn colibri-dev colibri-active      # dev (current)
+ln -sfn colibri     colibri-active      # v1.12.1 release (fallback)
+launchctl kickstart -k gui/$(id -u)/io.macstudio.hub.colibri
+# update dev: git -C colibri-dev pull && make -C colibri-dev/c qwen36 olmoe
+```
+
+On **v1.12.1** only: qwen36 refuses tools, so it needs `env COLI_TOOL_FALLBACK=1` **and**
+`patches/0001-qwen36-tool-fallback.patch` (its fallback prompt showed a bare `{function-name}` template
+that Qwen3.6 copied literally, so every pi call was rejected). On `dev` the fallback no longer applies
+to qwen36 and the patch is not needed.
 
 ## Tests
 
