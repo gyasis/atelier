@@ -100,7 +100,11 @@ def _load_registry() -> tuple[dict, str | None]:
                               "ram": float(spec.get("ram", 24)),
                               "args": args.split() if isinstance(args, str) else list(args),
                               # per-model engine env, e.g. {"COLI_TOOL_FALLBACK": "1"}
-                              "env": {str(k): str(v) for k, v in (spec.get("env") or {}).items()}}
+                              "env": {str(k): str(v) for k, v in (spec.get("env") or {}).items()},
+                              # request fields filled in when a client does not set them. The
+                              # engine's own --no-think is not honoured by every family (qwen38
+                              # measured 2026-09-29: flag ignored, enable_thinking=false works).
+                              "request_defaults": dict(spec.get("request_defaults") or {})}
             default = d.get("default")
         except Exception as e:
             print(f"[colibri] registry config error ({MODELS_CONFIG}): {e}", flush=True)
@@ -266,6 +270,13 @@ async def _stop_child() -> None:
         PGID_FILE.unlink(missing_ok=True)
 
 
+def _apply_request_defaults(alias: str, body: dict) -> dict:
+    """Fill the model's request_defaults into body without overriding anything the client set."""
+    for k, v in REGISTRY.get(alias, {}).get("request_defaults", {}).items():
+        body.setdefault(k, v)
+    return body
+
+
 def _resolve_alias(requested: str | None) -> str:
     if requested and requested not in ("", "?"):
         if requested in REGISTRY:
@@ -399,7 +410,7 @@ async def _run_job(job: dict) -> None:
             job.update(status="loading", loading_started_at=time.time())
             _job_write(job)
             await _ensure_started(alias)
-            body = dict(job["body"])
+            body = _apply_request_defaults(alias, dict(job["body"]))
             body["model"] = alias
             body["stream"] = False
             _job_phase = "running"
@@ -780,9 +791,12 @@ async def proxy_v1(path: str, request: Request):
             parsed = {}
     alias = _resolve_alias(parsed.get("model"))
     await _ensure_started(alias)
-    if parsed and parsed.get("model") != alias:
+    if parsed and request.method == "POST":
+        before = json.dumps(parsed, sort_keys=True)
         parsed["model"] = alias
-        body = json.dumps(parsed).encode()
+        _apply_request_defaults(alias, parsed)
+        if json.dumps(parsed, sort_keys=True) != before:
+            body = json.dumps(parsed).encode()
     headers = {k: v for k, v in request.headers.items()
                if k.lower() not in ("host", "content-length", "authorization")}
     client = httpx.AsyncClient(timeout=CHILD_TIMEOUT)
