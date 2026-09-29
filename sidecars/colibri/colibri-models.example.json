@@ -13,9 +13,9 @@
         "--cap",
         "256"
       ],
-      "note": "ram = governor estimate only (qwen36 ignores --ram); memory/speed set by --cap. cap 256: 14.0 GB RSS, 2.7 tok/s measured. env COLI_TOOL_FALLBACK=1 = experimental prompt-injected tool calls (qwen36 has no native tool support).",
+      "note": "Run on colibri dev (eefa57a+): native tool calls (#1794) + prefix reuse (#1767). ram = governor estimate only (qwen36 ignores --ram); memory/speed set by --cap (cap 256: ~14 GB, ~2.7 tok/s). On v1.12.1 instead: env COLI_TOOL_FALLBACK=1 + patches/0001.",
       "env": {
-        "COLI_TOOL_FALLBACK": "1"
+        "COLI_PREFIX_LOG": "1"
       }
     },
     "colibri-olmoe-tiny": {
