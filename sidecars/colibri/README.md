@@ -127,6 +127,47 @@ the cap in use, and a cap change needs a re-measure. An example registry is `col
 Upstream measures 12.8–15.7 tok/s at cap 256 on an AVX-512 x86 box; its batched CPU prefill is
 AVX2-only, which is a likely (unmeasured) part of the M1 Max gap.
 
+## Models on this box (measured 2026-09-29, Mac Studio M1 Max 64 GB, colibri dev `eefa57a`)
+
+Downloaded with `pull_models.sh` (resumable, pfetch, hash-verified; ~80 MB/s that day). Every model
+got `smoke_model.py` (load + answer + native tool call + memory) and, where it passed, the same pi
+task (fix `add()`, run pytest). Numbers were taken while other models downloaded, so they are
+pessimistic.
+
+| alias | model (total / active) | disk | RSS measured | pi task | notes |
+|---|---|---|---|---|---|
+| `colibri-qwen36` | Qwen3.6-35B-A3B | 23 GB | ~14 GB (cap 256) | **12 min** (491/33/74/62/43/21 s) | best interactive option here |
+| `colibri-qwen38-flash-next` | Qwen3.8-Flash-Next 125B(+51B n-gram) / 6B | 186 GB | ~11.8 GB (cap 32) | **29 min** (1401/165/98/76 s) | fastest later rounds; needs `request_defaults` (see below) |
+| `colibri-dsv4-flash` | DeepSeek V4 Flash 284B / 13B | 167 GB | ~19.3 GB | **2 h 13 min** (5601/1215/848/329 s) | correct, overnight-class: prompt read ~0.4-1.3 tok/s on CPU |
+| `colibri-qwen38-27b` | Qwen3.8-27B dense | 51 GB (converted) | ~14-15.5 GB | not run | slow here and prefix reuse diverges; **use it via Ollama instead** |
+| `colibri-glm53` | GLM-5.3 744B / 40B | 419 GB | pending | pending | engine built with Metal (`METAL=1`, `COLI_METAL=1`) |
+| `colibri-dsv41-flash` | DeepSeek V4.1 Flash 552B / 16B | 510 GB | pending | pending | needs `prepare_dsv41.py` (done by `pull_models.sh`) |
+
+GLM-5.3-Flash was dropped (a ~25 h conversion, and ~20-44 s/token on this class of machine per its
+docs); `pull_models.sh glm53_flash` still fetches it.
+
+### Thinking must be switched off per request for the Qwen3.8 family
+
+`--no-think` is **ignored** by the qwen38 engine (measured: 93 chars of reasoning, 30 s for "OK").
+`enable_thinking: false` or `reasoning_effort: "none"` in the REQUEST works (0 chars, 0.4-5.8 s).
+pi does not send either for a non-reasoning model, so the registry carries
+
+```json
+"request_defaults": {"enable_thinking": false}
+```
+
+which the sidecar fills into every `/v1` and `/jobs` request that does not set it (never overriding
+the client). `think_probe.py <alias>` measures which switch a model honours.
+
+### Model swaps through the governor
+
+The sidecar holds one model. A request for a different model used to get a 503 even with plenty of
+memory: admission counts the idle model against the budget, while `make_room` looks at physical free
+memory and saw no need to evict. The governor now unloads the colibri sidecar's idle model when a
+different colibri model is requested (the swap would free it anyway), and converts any remaining
+budget shortfall into a physical target for `make_room`. Its estimate per model comes from this
+sidecar's `/models` (`ram`), not a flat 16 GB.
+
 ## Driving a coding agent (pi) with Colibri
 
 **Run it on Colibri's `dev` branch** (built from `eefa57a`, 2026-09-29): it has native Qwen3.6 tool

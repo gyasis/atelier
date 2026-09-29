@@ -867,6 +867,10 @@ LLM_ROUTE_BASE = {"ollama": OLLAMA_URL,
                   "colibri": SIDECAR_BASE.get("colibri", "")}
 _tags_last = 0.0
 _sidecar_models: dict[str, str] = {}   # backend → the single model it currently serves
+# colibri serves several very different models (≈5-22 GB); its /models publishes each one's
+# registry `ram` (a MEASURED footprint). Use that as the admission estimate instead of one flat
+# "colibri-" override. Refreshed with the other catalogs every 60 s.
+_colibri_ram: dict[str, float] = {}
 
 
 LLM_SIDECARS = ("mlxlm", "llamacpp", "colibri")   # sidecars that hold an LLM under a lease
@@ -906,6 +910,14 @@ async def _refresh_gate(client: httpx.AsyncClient, vm: dict, tenants: list[dict]
                     catalog[be] = [d["model"]]
             except Exception:
                 pass
+        try:
+            ms = (await client.get(f"{SIDECAR_BASE['colibri']}/models", timeout=3)).json().get("data", [])
+            fresh = {m["id"]: float(m["ram_gb"]) for m in ms if m.get("id") and m.get("ram_gb")}
+            if fresh:
+                _colibri_ram.clear()
+                _colibri_ram.update(fresh)
+        except Exception:
+            pass                                   # keep the last good map; "colibri-" override is the floor
         gate.set_catalog(catalog, LLM_ROUTE_BASE)
         _tags_last = now
     # (c) untracked load = models loaded with NO active lease (bypassed the gate).
@@ -2621,6 +2633,43 @@ def _record_proxy_call(path: str, model: str, backend: str, status: int,
     _proxy_recent.append((norm, ts))
 
 
+async def _proxy_make_room(backend: str, model: str, est_gb: float) -> list:
+    """Free BUDGET room for one request, then refresh the gate's view. Returns the names freed.
+
+    Admission is decided by budget accounting (committed + untracked vs the live ceiling), but
+    make_room stops on PHYSICAL free memory. The two disagree when an idle model sits in RAM
+    with plenty of physical memory left: the budget says no room, make_room says no need
+    (measured 2026-09-28: free_budget 13.3 GB vs live free 25.3 GB, nothing evicted, 503).
+    So: (1) a colibri request for a DIFFERENT model than the one the sidecar holds idle unloads
+    that model directly — the swap would free it anyway, and nothing else is touched; (2) any
+    remaining shortfall is converted into a physical target make_room can act on."""
+    freed: list = []
+    try:
+        if backend == "colibri":
+            async with httpx.AsyncClient() as c:
+                st = (await c.get(f"{SIDECAR_BASE['colibri']}/readyz", timeout=3)).json()
+                if st.get("lifecycle") == "idle" and st.get("model") and st.get("model") != model:
+                    r = (await c.post(f"{SIDECAR_BASE['colibri']}/admin/unload", timeout=60)).json()
+                    if r.get("unloaded"):
+                        freed.append(f"colibri:{st.get('model')}")
+        shortfall = est_gb - gate.free_budget_gb() + (LLM_LIVE_FLOOR_GB if not freed else 0)
+        if shortfall > 0 and not freed:
+            res = await make_room(MakeRoomReq(dry_run=False,
+                                              need_gb=read_vm()["free_gb"] + shortfall))
+            freed += [f.get("name") for f in res.get("freed", []) if f.get("evicted") or f.get("result")]
+        if freed:
+            async with httpx.AsyncClient() as c:
+                tenants = await poll_ollama(c)
+            gate.set_live(resident_gb=read_vm()["resident_gb"], free_gb=read_vm()["free_gb"])
+            loaded = [{"backend": "ollama", "model": t.get("name"), "gb": t.get("mem_gb", 0.0)}
+                      for t in tenants if t.get("name")]
+            gate.set_untracked_gb(gate.untracked_from(loaded))
+        return freed
+    except Exception as e:
+        print(f"[governor] proxy make_room failed: {e}", flush=True)
+        return []
+
+
 # A proxied call can outlive its lease: leases expire after LLM_LEASE_TTL_S (900 s) and the
 # forward below has no read timeout. An overnight colibri generation would otherwise lose its
 # memory reservation mid-run and let the gate admit another model on top of it. Re-admitting
@@ -2702,14 +2751,27 @@ async def llm_proxy(backend: str, path: str, request: Request):
             raw = json.dumps(body).encode()
         est_hint = gate.est_gb(model, ctx=chosen_ctx or PROXY_CTX_DEFAULT)
 
+    if backend == "colibri" and model in _colibri_ram:
+        est_hint = _colibri_ram[model]
+
     # Admit — wait in the queue until granted (fail-open after PROXY_MAX_WAIT_S).
     start = time.time()
     lease = None
+    evicted_once = False
     while True:
         d = await gate.admit(job_id, model, backend=backend, est_gb=est_hint)
         if d.grant:
             lease = d
             break
+        if backend in PROXY_NO_QUEUE_BACKENDS and not evicted_once and not d.terminal:
+            # Before refusing, do what /admit does: reclaim IDLE models once (make_room never
+            # touches a busy one), then re-decide. Measured 2026-09-28: an idle colibri model left
+            # warm by an earlier call was the only thing between a request and its grant.
+            evicted_once = True
+            freed = await _proxy_make_room(backend, model, est_hint or gate.est_gb(model))
+            if freed:
+                print(f"[governor] proxy {job_id}: freed idle {freed} to admit {backend}/{model}", flush=True)
+                continue
         if backend in PROXY_NO_QUEUE_BACKENDS:
             await gate.release(job_id=job_id)          # step out of the line; never block others
             return JSONResponse({"ok": False, "error": "not admitted now", "reason": d.reason,
